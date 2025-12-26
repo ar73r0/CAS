@@ -1,0 +1,11 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251128-164759","PortScan","CAS-LAB-01","28/11/2025 16:48:01","Medium","Failed","Port scan simulation failed.","The term 'Get-VM' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+"20251128-164759","PortScan","CAS-LAB-02","28/11/2025 16:48:02","Medium","Failed","Port scan simulation failed.","The term 'Get-VM' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+"20251128-164759","PortScan","CAS-LAB-03","28/11/2025 16:48:03","Medium","Failed","Port scan simulation failed.","The term 'Get-VM' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+"20251128-164759","BruteForce","CAS-LAB-01","28/11/2025 16:48:28","Medium","Failed","Brute-force simulation failed.","The Hyper-V Module for PowerShell is not available on this machine."
+"20251128-164759","PrivilegeEscalation","CAS-LAB-01","28/11/2025 16:48:37","Medium","Failed","Privilege escalation simulation failed.","Object reference not set to an instance of an object."
+"20251128-164759","BruteForce","CAS-LAB-02","28/11/2025 16:48:38","Medium","Failed","Brute-force simulation failed.","Object reference not set to an instance of an object."
+"20251128-164759","PrivilegeEscalation","CAS-LAB-02","28/11/2025 16:48:48","Medium","Failed","Privilege escalation simulation failed.","The Hyper-V Module for PowerShell is not available on this machine."

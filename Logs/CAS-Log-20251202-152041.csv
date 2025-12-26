@@ -1,0 +1,2 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251202-152041","BruteForce","CAS-LAB-01","02/12/2025 15:22:59","Medium","Failed","Brute-force simulation failed.","An error has occurred which PowerShell cannot handle. A remote session might have ended."

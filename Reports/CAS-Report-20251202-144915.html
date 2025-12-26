@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Cyber Attack Simulator Report - 20251202-144915</title>
+<style>
+body { font-family: Segoe UI, Arial, sans-serif; margin:20px; }
+h1 { color:#333; }
+table { border-collapse:collapse; width:100%; margin-top:10px; }
+th, td { border:1px solid #ccc; padding:4px 6px; font-size:12px; }
+th { background:#f0f0f0; text-align:left; }
+tr:nth-child(even) { background:#fafafa; }
+.badge-success { color:#155724; background:#d4edda; padding:2px 6px; border-radius:4px; }
+.badge-failed { color:#721c24; background:#f8d7da; padding:2px 6px; border-radius:4px; }
+.summary { margin-top:10px; padding:10px; background:#f7f7f7; border:1px solid #e0e0e0; }
+</style>
+</head>
+<body>
+<h1>Cyber Attack Simulator Report</h1>
+<p><strong>Session:</strong> 20251202-144915</p>
+<p><strong>Difficulty:</strong> Easy</p>
+<p><strong>Attack types:</strong> BruteForce, PrivilegeEscalation, PortScan, LateralMovement</p>
+<p><strong>Educational mode:</strong> enabled (details per scenario included).</p>
+<div class="summary">
+<canvas id="chart" width="400" height="200"></canvas>
+<p id="summaryText"></p>
+</div>
+<table>
+<thead>
+<tr>
+    <th>Timestamp</th>
+    <th>VM</th>
+    <th>Scenario</th>
+    <th>Difficulty</th>
+    <th>Status</th>
+    <th>Message</th>
+    <th>Details</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>02/12/2025 14:49:18</td><td>CAS-LAB-01</td><td>BruteForce</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Simulated brute-force (5 attempts) on CAS-LAB-01 (guest login skipped).</td><td>GuestLog=Skipped; Delay(s)=1; Educational: Brute force attempts generate repeated failed logins; monitor for abnormal login patterns.</td></tr>
+<tr><td>02/12/2025 14:49:19</td><td>CAS-LAB-01</td><td>LateralMovement</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Simulated lateral movement hops on CAS-LAB-01 (host-only).</td><td>Hops=RDP:3389->ServiceAccount|SMB:445->AdminShare; GuestLog=Skipped; Delay(s)=1; Educational: Lateral movement often leaves login events (4624/4625), service creations, and SMB/WMI traffic.</td></tr>
+<tr><td>02/12/2025 14:49:19</td><td>CAS-LAB-01</td><td>PortScan</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Port scan skipped guest access for CAS-LAB-01.</td><td>TargetIP=Skipped; PortsChecked=Skipped; Delay(s)=1; Educational: Port scans enumerate exposed services; monitor for connection bursts on common ports.</td></tr>
+<tr><td>02/12/2025 14:49:18</td><td>CAS-LAB-01</td><td>PrivilegeEscalation</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Privilege escalation check skipped guest login on CAS-LAB-01.</td><td>GuestLog=Skipped; Delay(s)=1; Educational: Checks admin group membership; look for elevation attempts and token use.</td></tr>
+<tr><td>02/12/2025 14:49:19</td><td>CAS-LAB-02</td><td>BruteForce</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Simulated brute-force (5 attempts) on CAS-LAB-02 (guest login skipped).</td><td>GuestLog=Skipped; Delay(s)=1; Educational: Brute force attempts generate repeated failed logins; monitor for abnormal login patterns.</td></tr>
+<tr><td>02/12/2025 14:49:20</td><td>CAS-LAB-02</td><td>LateralMovement</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Simulated lateral movement hops on CAS-LAB-02 (host-only).</td><td>Hops=RDP:3389->ServiceAccount|SMB:445->AdminShare; GuestLog=Skipped; Delay(s)=1; Educational: Lateral movement often leaves login events (4624/4625), service creations, and SMB/WMI traffic.</td></tr>
+<tr><td>02/12/2025 14:49:20</td><td>CAS-LAB-02</td><td>PortScan</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Port scan skipped guest access for CAS-LAB-02.</td><td>TargetIP=Skipped; PortsChecked=Skipped; Delay(s)=1; Educational: Port scans enumerate exposed services; monitor for connection bursts on common ports.</td></tr>
+<tr><td>02/12/2025 14:49:19</td><td>CAS-LAB-02</td><td>PrivilegeEscalation</td><td>Easy</td><td><span class='badge-success'>Succeeded</span></td><td>Privilege escalation check skipped guest login on CAS-LAB-02.</td><td>GuestLog=Skipped; Delay(s)=1; Educational: Checks admin group membership; look for elevation attempts and token use.</td></tr>
+</tbody>
+</table>
+<h3>Scenario Library</h3>
+<ul>
+<li>BruteForce v1.0 - Simulated brute-force login attempts (Level: Easy)</li>
+<li>PrivilegeEscalation v1.0 - Checks admin rights inside the VM (Level: Easy)</li>
+<li>PortScan v1.0 - Host-based port scan of guest IP (Level: Easy)</li>
+<li>LateralMovement v1.0 - Simulated lateral movement log trail (Level: Medium)</li>
+
+</ul>
+<script>
+(function() {
+    var data = [{ name: 'BruteForce', total: 2, success:  .Count },{ name: 'LateralMovement', total: 2, success:  .Count },{ name: 'PortScan', total: 2, success:  .Count },{ name: 'PrivilegeEscalation', total: 2, success:  .Count }];
+    var successes = data.reduce((a,b)=>a+b.success,0);
+    var total = data.reduce((a,b)=>a+b.total,0);
+    var ctx = document.getElementById('chart').getContext('2d');
+    var labels = data.map(d=>d.name);
+    var successData = data.map(d=>d.success);
+    var totalData = data.map(d=>d.total);
+    var max = Math.max.apply(null,totalData.concat([1]));
+    function drawBar(x, y, w, h, color){
+        ctx.fillStyle = color; ctx.fillRect(x,y,w,h);
+    }
+    ctx.clearRect(0,0,400,200);
+    var barWidth = 30; var gap = 10; var startX = 30; var baseY = 180; var scale = max>0 ? 120/max : 1;
+    labels.forEach(function(lbl, i){
+        var x = startX + i*(barWidth*2+gap);
+        var totalH = totalData[i]*scale;
+        var succH = successData[i]*scale;
+        drawBar(x, baseY-totalH, barWidth, totalH, '#d0d0d0');
+        drawBar(x+barWidth, baseY-succH, barWidth, succH, '#4caf50');
+        ctx.fillStyle='#333'; ctx.fillText(lbl, x, baseY+12);
+    });
+    document.getElementById('summaryText').textContent = 'Total: ' + total + ' | Succeeded: ' + successes + ' | Failed: ' + (total - successes);
+})();
+</script>
+</body>
+</html>
