@@ -1,0 +1,6 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251202-141534","PortScan","CAS-LAB-01","02/12/2025 14:15:39","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-01'."
+"20251202-141534","PortScan","CAS-LAB-02","02/12/2025 14:15:40","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-02'."
+"20251202-141534","PortScan","CAS-LAB-03","02/12/2025 14:15:40","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-03'."
+"20251202-141534","BruteForce","CAS-LAB-01","02/12/2025 14:22:10","Medium","Failed","Brute-force simulation failed.","Object reference not set to an instance of an object."
+"20251202-141534","PrivilegeEscalation","CAS-LAB-01","02/12/2025 14:22:10","Medium","Failed","Privilege escalation simulation failed.","Object reference not set to an instance of an object."

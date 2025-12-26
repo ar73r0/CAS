@@ -1,0 +1,3 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251128-171023","PortScan","CAS-LAB-01","28/11/2025 17:10:26","Easy","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-01'."
+"20251128-171023","PortScan","CAS-LAB-02","28/11/2025 17:10:26","Easy","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-02'."

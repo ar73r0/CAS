@@ -1,0 +1,8 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251202-142235","PortScan","CAS-LAB-01","02/12/2025 14:22:38","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-01'."
+"20251202-142235","PortScan","CAS-LAB-02","02/12/2025 14:22:39","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-02'."
+"20251202-142235","PortScan","CAS-LAB-03","02/12/2025 14:22:40","Medium","Failed","Port scan simulation failed.","Could not determine IP address for VM 'CAS-LAB-03'."
+"20251202-142235","BruteForce","CAS-LAB-01","02/12/2025 14:23:17","Medium","Failed","Brute-force simulation failed.","An error has occurred which PowerShell cannot handle. A remote session might have ended."
+"20251202-142235","PrivilegeEscalation","CAS-LAB-01","02/12/2025 14:23:45","Medium","Failed","Privilege escalation simulation failed.","Object reference not set to an instance of an object."
+"20251202-142235","BruteForce","CAS-LAB-02","02/12/2025 14:23:45","Medium","Failed","Brute-force simulation failed.","Object reference not set to an instance of an object."
+"20251202-142235","PrivilegeEscalation","CAS-LAB-02","02/12/2025 14:23:46","Medium","Failed","Privilege escalation simulation failed.","Object reference not set to an instance of an object."

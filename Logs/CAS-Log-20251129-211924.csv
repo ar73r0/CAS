@@ -1,0 +1,6 @@
+"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
+"20251129-211924","PortScan","CAS-LAB-01","29/11/2025 21:19:33","Medium","Failed","Port scan simulation failed.","You do not have the required permission to complete this task. Contact the administrator of the authorization policy for the computer 'AARONLEGION'."
+"20251129-211924","PortScan","CAS-LAB-02","29/11/2025 21:19:34","Medium","Failed","Port scan simulation failed.","You do not have the required permission to complete this task. Contact the administrator of the authorization policy for the computer 'AARONLEGION'."
+"20251129-211924","PortScan","CAS-LAB-03","29/11/2025 21:19:35","Medium","Failed","Port scan simulation failed.","You do not have the required permission to complete this task. Contact the administrator of the authorization policy for the computer 'AARONLEGION'."
+"20251129-211924","BruteForce","CAS-LAB-01","29/11/2025 21:21:36","Medium","Failed","Brute-force simulation failed.","Object reference not set to an instance of an object."
+"20251129-211924","PrivilegeEscalation","CAS-LAB-01","29/11/2025 21:21:36","Medium","Failed","Privilege escalation simulation failed.","Object reference not set to an instance of an object."

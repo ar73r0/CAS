@@ -1,0 +1,6 @@
+[
+  { "Name": "BruteForce", "Version": "1.0", "Difficulty": "Easy", "Description": "Simulated brute-force login attempts" },
+  { "Name": "PrivilegeEscalation", "Version": "1.0", "Difficulty": "Easy", "Description": "Checks admin rights inside the VM" },
+  { "Name": "PortScan", "Version": "1.0", "Difficulty": "Easy", "Description": "Host-based port scan of guest IP" },
+  { "Name": "LateralMovement", "Version": "1.0", "Difficulty": "Medium", "Description": "Simulated lateral movement log trail" }
+]
