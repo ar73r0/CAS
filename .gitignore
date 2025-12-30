@@ -1,2 +1,6 @@
 /Logs/
 /Reports/
+*.log
+*.csv
+*.json
+*.html
