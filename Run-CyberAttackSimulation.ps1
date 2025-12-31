@@ -57,8 +57,21 @@ if (-not $PSBoundParameters.ContainsKey('NumberOfVMs')) {
 
 # Default Base VM image if none provided
 if (-not $PSBoundParameters.ContainsKey('VHDPath')) {
-    $defaultVhdPath = Join-Path $PSScriptRoot 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx'
-    if (Test-Path $defaultVhdPath) { $VHDPath = $defaultVhdPath }
+    $candidates = @(
+        Join-Path $PSScriptRoot 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx',
+        Join-Path $PSScriptRoot 'VMS\PatientZero\PatientZero.vhdx',
+        Join-Path $PSScriptRoot 'PatientZero.vhdx'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { $VHDPath = $candidate; break }
+    }
+
+    if (-not $VHDPath) {
+        $patientZero = Get-ChildItem -Path (Join-Path $PSScriptRoot 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($patientZero) { $VHDPath = $patientZero.FullName }
+    }
 }
 # Default ISO if no valid VHD is present; will be attached for install/boot
 if (-not $PSBoundParameters.ContainsKey('ISOPath')) {

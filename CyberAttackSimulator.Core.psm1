@@ -20,6 +20,7 @@ $script:CasConfig      = $null
 $script:CasModulePath  = $MyInvocation.MyCommand.Path
 $script:CasChallenges  = $null
 $script:CasProfiles    = @{}
+$script:CasUserProfiles= @()
 
 class CasScenarioResult {
     [string]$SessionId
@@ -138,9 +139,22 @@ function Get-CASModuleRoot {
 
 function Get-CASDefaultVHDPath {
     $root = Get-CASModuleRoot
-    $candidate = Join-Path $root 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx'
-    if (Test-Path $candidate) {
-        return (Resolve-Path $candidate).ProviderPath
+    $candidates = @(
+        Join-Path $root 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx',
+        Join-Path $root 'VMS\PatientZero\PatientZero.vhdx',
+        Join-Path $root 'PatientZero.vhdx'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).ProviderPath
+        }
+    }
+
+    $patientZero = Get-ChildItem -Path (Join-Path $root 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($patientZero) {
+        return $patientZero.FullName
     }
 }
 
@@ -258,7 +272,7 @@ function Initialize-CASSimulator {
 
     $resolvedVhdPath = $null
     $baseVhdUsable = $false
-    $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
+    $diffDiskRoot = $null
 
     if ($VHDPath) {
         if (Test-Path $VHDPath) {
@@ -287,6 +301,14 @@ function Initialize-CASSimulator {
         else {
             Write-Warning "No VHD/VHDX provided and default base image not found. VMs will be created empty."
         }
+    }
+
+    if ($resolvedVhdPath) {
+        $parentDir = Split-Path -Path $resolvedVhdPath -Parent
+        $diffDiskRoot = Join-Path $parentDir 'DiffDisks'
+    }
+    else {
+        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
     }
 
     $resolvedIsoPath = $null
@@ -328,6 +350,7 @@ function Initialize-CASSimulator {
         EducationalMode = $EducationalMode.IsPresent
         ChallengeMode   = $ChallengeMode.IsPresent
         DifficultyScript= $difficultyScript
+        UserProfiles    = Get-CASUserProfiles -Difficulty $Difficulty
     }
 
     # Build per-VM profiles for defenses/countermeasures
@@ -540,6 +563,28 @@ function New-CASProfiles {
         }
 
         $profiles[$vmName] = $profile
+    }
+    return $profiles
+}
+
+function Get-CASUserProfiles {
+    [CmdletBinding()]
+    param(
+        [Parameter()][ValidateSet('Easy','Medium','Hard')]
+        [string]$Difficulty
+    )
+
+    if (-not $script:CasUserProfiles -or $script:CasUserProfiles.Count -eq 0) {
+        $script:CasUserProfiles = @(
+            [pscustomobject]@{ Difficulty='Easy';   Persona='SOC Trainee';     CredentialStrength='Weak';    Notes='Weak defaults to drive detection of bad practices.' },
+            [pscustomobject]@{ Difficulty='Medium'; Persona='Tier-1 Analyst';  CredentialStrength='Moderate'; Notes='Mix of weak and hardened hosts for balanced labs.' },
+            [pscustomobject]@{ Difficulty='Hard';   Persona='Tier-2 Engineer'; CredentialStrength='Strong';   Notes='Hardened baseline with minimal exposed services.' }
+        )
+    }
+
+    $profiles = $script:CasUserProfiles
+    if ($Difficulty) {
+        return $profiles | Where-Object { $_.Difficulty -eq $Difficulty }
     }
     return $profiles
 }
