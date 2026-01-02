@@ -11,23 +11,24 @@ Cyber Attack Simulator automatiseert een Hyper-V lab om veelvoorkomende aanvalss
 ## Requirements
 - Windows-host met Hyper-V ingeschakeld en beheerdersrechten.
 - PowerShell 5.1 of hoger met toegang tot het Hyper-V modulepakket.
-- Voldoende schijfruimte voor het base image (`VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx` of `VMS\PatientZero\PatientZero.vhdx`) en eventuele differencing disks.
-- Optioneel: een ISO-bestand in `VMS\ISO` wanneer geen bruikbaar base image aanwezig is.
+- Voldoende schijfruimte voor een Windows 10 base image (of lege disks) en differencing disks.
+- Windows 10 ISO (download van Microsoft) en optioneel een voorgebouwde Kali (Hyper-V) image.
 
 ## Installatie
 1. Clone de repository naar een Hyper-V geschikte host.
-2. Plaats het base image (`BaseVM.vhdx` of `PatientZero.vhdx`) in de map `VMS` volgens de standaardpaden.
-3. Open een verhoogde PowerShell sessie (Run as Administrator) in de root van de repo.
-4. Controleer met `Get-Module -ListAvailable -Name Hyper-V` of het Hyper-V modulepakket beschikbaar is.
+2. Open een verhoogde PowerShell sessie (Run as Administrator) in de root van de repo.
+3. Controleer met `Get-Module -ListAvailable -Name Hyper-V` of het Hyper-V modulepakket beschikbaar is.
 
 ## Configuratie
 - **Moeilijkheidsgraad:** via `-Difficulty Easy|Medium|Hard` voor aangepaste profielen en scenario-varianten.
 - **Aantal VM's:** ingesteld met `-NumberOfVMs` (standaard 2) zodat de labgrootte aansluit bij de oefening.
 - **Aanvalstypen:** `-AttackTypes` accepteert een array met scenario's (`BruteForce`, `PrivilegeEscalation`, `PortScan`, `LateralMovement`).
 - **Netwerk:** `-VirtualSwitch` bepaalt de te gebruiken Hyper-V switch; CAS maakt deze aan indien nodig.
-- **Bestanden:** `-VHDPath` en `-ISOPath` kunnen custom paden zijn; standaard zoekt CAS naar bestanden in `VMS`.
+- **Bestanden:** `-VHDPath` en `-ISOPath` kunnen custom paden zijn; standaard leest CAS deze uit `.env`.
 - **Toegang tot guests:** met `-AllowGuestLogon` en `-GuestCredential` kan CAS PowerShell Direct gebruiken om settings binnen de guest te pushen.
 - **Logging & SIEM:** `-LogPath`, `-ReportPath` en `-SIEMEndpoint` bepalen waar resultaten terechtkomen en of ze extern worden doorgestuurd.
+- **Attacker VM (Kali):** configureer `-AttackerVMName`, `-AttackerSSHUser` (meestal `kali`) en optioneel key/port. CAS start Kali automatisch, voert BruteForce/PortScan/Privilege probes vanaf Kali uit en zet Kali na de run weer uit.
+- **Auto-cleanup:** wanneer een aanval slaagt, wordt de doel-VM verwijderd; attacker wordt na alle aanvallen uitgezet.
 
 ## Gebruik
 Snelle start vanuit een verhoogde PowerShell sessie:
@@ -36,22 +37,45 @@ Snelle start vanuit een verhoogde PowerShell sessie:
 ```
 - Het script zoekt automatisch naar een base image en creëert per VM een differencing disk.
 - Met `-Parallel` worden scenario's per VM gelijktijdig uitgevoerd (ChallengeMode forceert seriële uitvoering).
-- Gebruik `test-launchvhdx.ps1` om een VHDX te testen voordat het volledige lab wordt opgebouwd.
 - Rapporteerresultaten worden opgeslagen in de opgegeven `Reports` map en de loglijn data in JSONL/CSV onder `Logs`.
 
-### VMs bouwen vanaf een ISO (zonder vooraf gemaakte VHDX)
-1. Zet een Windows ISO in de repo of vul het pad in `.env` als `CAS_ISO_PATH=C:\pad\naar\windows.iso`.
-2. Laat `CAS_BASE_VHD_PATH` leeg of verwijder de regel zodat er geen base image wordt verwacht.
-3. Start de simulatie zonder `-VHDPath`; CAS maakt per VM een lege dynamische VHDX (40GB) in `DiffDisks` en hangt de ISO eraan als bootmedium:
-```powershell
-.\Run-CyberAttackSimulation.ps1 -Difficulty Easy -NumberOfVMs 1 -AllowGuestLogon -GuestCredential (Get-Credential)
-```
-4. De VM boot vanaf de ISO; installeer het OS in de VM. Voor volgende runs kun je het geinstalleerde VHDX-pad in `.env` zetten (`CAS_BASE_VHD_PATH`) of `-VHDPath` meegeven zodat CAS differencing disks daarop baseert.
+### VMs bouwen vanaf een ISO (Windows 10)
+1. Download een Windows 10 ISO (Microsoft) en noteer het pad, bijv. `C:\ISOs\Win10.iso`.
+2. Zet in `.env`:
+   ```
+   CAS_ISO_PATH=C:\ISOs\Win10.iso
+   CAS_BASE_VHD_PATH=
+   ```
+3. Start de simulatie zonder `-VHDPath`; CAS maakt per VM een lege dynamische VHDX (40GB) in `DiffDisks` en boot vanaf de ISO:
+   ```powershell
+   .\Run-CyberAttackSimulation.ps1 -Difficulty Easy -NumberOfVMs 1 -AllowGuestLogon -GuestCredential (Get-Credential)
+   ```
+4. In Windows Setup: verwijder eventuele oude partities, installeer naar de lege disk, rond setup af. Daarna kun je het geinstalleerde VHDX-pad invullen in `.env` (`CAS_BASE_VHD_PATH`) zodat volgende runs differencing disks daarop baseren.
 
 ### Aanvallende VM (Kali)
-- Standaard inlog: gebruiker `kali`, wachtwoord `kali`.
-- Geef de aanvaller door via `-AttackerVMName` en `-AttackerSSHUser kali` (en eventueel `-AttackerSSHPrivateKeyPath`).
-- De Kali-VM wordt automatisch gestart als deze is geconfigureerd.
+- Download een voorgebouwde Kali Hyper-V image (kali.org), importeer als VM (bijv. naam `KaliAttacker`), standaard inlog `kali`/`kali`.
+- Geef de aanvaller door via `-AttackerVMName`, `-AttackerSSHUser kali` (en eventueel `-AttackerSSHPrivateKeyPath`).
+- CAS start Kali automatisch, voert de aanvallen uit vanaf Kali en zet Kali na de run weer uit. Wanneer een aanval slaagt, wordt de doel-VM verwijderd.
+
+### .env voorbeeld
+Plaats een `.env` in de repo-root:
+```
+CAS_BASE_VHD_PATH=C:\HyperV\BaseImages\Win10-Base.vhdx
+CAS_ISO_PATH=C:\ISOs\Win10.iso
+
+ATTACKER_VM_NAME=KaliAttacker
+ATTACKER_SSH_USER=kali
+ATTACKER_SSH_PRIVATE_KEY=
+ATTACKER_SSH_PORT=22
+
+CAS_WEAK_USER=casuser
+CAS_WEAK_PASS=P@ssw0rd123
+CAS_STUDENT_USER=student
+CAS_STUDENT_WEAK_PASS=student
+CAS_STUDENT_STRONG_PASS=P@ssw0rd123!
+CAS_BRUTEFORCE_PASSLIST=Winter2025!,P@ssw0rd123,Welcome1!
+```
+De code leest `CAS_BASE_VHD_PATH` en `CAS_ISO_PATH` als defaults en gebruikt `ATTACKER_*` bij een geconfigureerde aanvaller.
 
 ## Projectstructuur
 - `Run-CyberAttackSimulation.ps1`: entrypoint dat de module importeert en het volledige proces (initialisatie ➜ provisioning ➜ scenario's ➜ rapportage) start.
