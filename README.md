@@ -90,7 +90,68 @@ De code leest `CAS_BASE_VHD_PATH` en `CAS_ISO_PATH` als defaults en gebruikt `AT
 - **Scenario-uitvoering:** `Invoke-CASSimulation` bouwt een matrix van VM's en aanvalstypes en voert scenario's sequentieel of parallel uit. ChallengeMode vraagt per scenario operator-input.
 - **Logging & rapportage:** `Write-CASLog` schrijft elk scenarioresultaat naar JSONL/CSV, `New-CASReport` leest die logs terug en produceert HTML/CSV rapporten. Een optionele `SIEMEndpoint` kan dezelfde payloads ontvangen.
 
+## SWOT-analyse
+
+### Strengths
+- Volledig geautomatiseerd Hyper-V lab voor educatieve security-oefeningen
+- Ondersteuning voor meerdere aanvalsscenario’s (brute force, port scan, privilege escalation, laterale beweging)
+- Gebruik van een aparte aanvallende Kali Linux VM voor realistische maar gecontroleerde simulaties
+- Configureerbare moeilijkheidsgraad en parallelle uitvoering van scenario’s
+- Uitgebreide logging en rapportage (JSONL, CSV en HTML), met optionele SIEM-doorsturing
+- Gebruik van differencing disks en automatische cleanup voor snelle en reproduceerbare labs
+
+### Weaknesses
+- Sterk afhankelijk van Windows, Hyper-V en PowerShell
+- Vereist voldoende hardware resources (CPU, RAM en opslag)
+- Aanvalsscenario’s zijn bewust vereenvoudigd en simulatief van aard, geen echte exploitatie
+
+### Opportunities
+- Toevoegen van extra aanvalsscenario’s en complexere aanvalsketens
+- Verdere integratie met SIEM- of SOC-platformen
+- Uitbreiding naar meerdere aanvallende VM’s of cloudgebaseerde labomgevingen
+- Inzet als vaste oefen- en demonstratieomgeving binnen cybersecurity- en ethical hacking-opleidingen
+
+### Threats
+- Mogelijk misbruik indien de tool buiten een gecontroleerde testomgeving wordt gebruikt
+- Afhankelijkheid van wijzigingen in Hyper-V, PowerShell of Windows
+- Snelle evolutie van aanvalstechnieken waardoor scenario’s regelmatig geüpdatet moeten worden
+
 ## Bronnen
-- Hyper-V PowerShell documentatie (Microsoft Learn) voor cmdlets zoals `New-VM`, `Set-VMFirmware`, `Add-VMDvdDrive`.
-- Eigen kennis en eerder ontwikkelde scripts uit de cursus; geen externe codefragmenten gekopieerd.
-- Interactie met A.I. (OpenAI GPT-5.1-Codex-Max) voor het opstellen van documentatie en commentaar.
+
+Microsoft. (n.d.). *PowerShell documentation*. Microsoft Learn.  
+Gebruikt als referentie voor PowerShell-syntax, modules, parameterisatie en scripting-best practices.  
+https://learn.microsoft.com/en-us/powershell/
+
+Microsoft. (n.d.). *Hyper-V PowerShell documentation*. Microsoft Learn.  
+Gebruikt voor het automatiseren van Hyper-V taken zoals VM-aanmaak, virtuele switches en VHD(X)-beheer.  
+https://learn.microsoft.com/en-us/powershell/module/hyper-v/
+
+Erasmus Hogeschool Brussel. (2025). *System Automation & Scripting* [Cursusmateriaal en slides].  
+Gebruikt als basis voor de structuur van de PowerShell-module, configuratiebeheer, foutafhandeling en automatiseringsprincipes.
+
+Erasmus Hogeschool Brussel. (2025). *Ethical Hacking* [Cursusmateriaal en slides].  
+Gebruikt als conceptuele achtergrond voor veelvoorkomende aanvalstechnieken die in dit project gesimuleerd worden.
+
+Offensive Security. (n.d.). *Kali Linux*.  
+Gebruikt als aanvallende virtuele machine voor het uitvoeren van gesimuleerde aanvalsscenario’s binnen een gecontroleerde Hyper-V labomgeving.  
+https://www.kali.org/
+
+MITRE. (n.d.). *MITRE ATT&CK® framework*.  
+Gebruikt als referentiekader voor het structureren en benoemen van aanvalsscenario’s.  
+https://attack.mitre.org/
+
+MITRE. (n.d.). *CALDERA: Automated adversary emulation system*.  
+Gebruikt als conceptueel voorbeeld van geautomatiseerde aanvalssimulatie in professionele omgevingen.  
+https://caldera.mitre.org/
+
+Red Canary. (2023). *What is breach and attack simulation (BAS)?*  
+Gebruikt om het project te positioneren binnen het domein van breach and attack simulation.  
+https://redcanary.com/blog/breach-and-attack-simulation/
+
+Scarfone, K., & Mell, P. (2012). *Guide to intrusion detection and prevention systems (IDPS)* (NIST Special Publication 800-94).  
+Gebruikt ter onderbouwing van het belang van logging en detectie tijdens securitytests.  
+https://nvlpubs.nist.gov/
+
+OpenAI. (2025). *ChatGPT* (GPT-5.x).  
+Gebruikt als hulpmiddel voor documentatie, structuurvoorstellen en tekstuele verduidelijkingen; geen code blind overgenomen.  
+https://openai.com/
