@@ -98,7 +98,7 @@ $chkAutoConsole = New-Object System.Windows.Forms.CheckBox
 $chkAutoConsole.Text = 'Auto-connect to VM console on start'
 $chkAutoConsole.Location = New-Object System.Drawing.Point(20, 60)
 $chkAutoConsole.AutoSize = $true
-$chkAutoConsole.Checked = $true
+$chkAutoConsole.Checked = $false
 
 $grpVMs.Controls.AddRange(@($lblVMs, $nudVMs, $lblLabPrefix, $txtLabPrefix, $lblSwitch, $txtSwitch, $chkAutoConsole))
 
@@ -152,6 +152,16 @@ $chkEdu.Checked = $true
 $grpModes.Controls.AddRange(@($chkParallel, $chkChallenge, $chkEdu))
 $tabAttacks.Controls.AddRange(@($grpScenarios, $grpModes))
 $tabControl.TabPages.Add($tabAttacks)
+
+$chkChallenge.Add_CheckedChanged({
+    if ($chkChallenge.Checked) {
+        $chkParallel.Checked = $false
+        $chkAutoConsole.Checked = $true
+    }
+    else {
+        $chkAutoConsole.Checked = $false
+    }
+})
 
 ### Tab 3: Guest & SIEM
 $tabGuest = New-Object System.Windows.Forms.TabPage

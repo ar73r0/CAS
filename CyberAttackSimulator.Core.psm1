@@ -426,6 +426,10 @@ function Initialize-CASSimulator {
         [Parameter()][System.Management.Automation.PSCredential]$GuestCredential,
         [Parameter()][switch]$AutoConnectConsole,
 
+        # Netwerk (interne switch + statische IP's)
+        [Parameter()][string]$NetworkPrefix = '192.168.56',
+        [Parameter()][int]$SubnetPrefixLength = 24,
+
         # Optioneel: configureer een aparte aanvaller (bijv. Kali) die via SSH commando's uitvoert
         [Parameter()][string]$AttackerVMName,
         [Parameter()][string]$AttackerSSHUser,
@@ -532,6 +536,12 @@ function Initialize-CASSimulator {
 
     $attackerEnabled = -not [string]::IsNullOrWhiteSpace($AttackerVMName) -and -not [string]::IsNullOrWhiteSpace($AttackerSSHUser)
 
+    # Network defaults
+    $gateway   = "{0}.1" -f $NetworkPrefix
+    $dnsServer = $gateway
+    $attackerIP= "{0}.10" -f $NetworkPrefix
+    $defenderStartOffset = 100
+
     $script:CasConfig = [pscustomobject]@{
         Difficulty      = $Difficulty
         NumberOfVMs     = $NumberOfVMs
@@ -551,6 +561,12 @@ function Initialize-CASSimulator {
         ChallengeMode   = $ChallengeMode.IsPresent
         DifficultyScript= $difficultyScript
         AutoConnectConsole       = $AutoConnectConsole.IsPresent
+        NetworkPrefix            = $NetworkPrefix
+        SubnetPrefixLength       = $SubnetPrefixLength
+        Gateway                  = $gateway
+        DnsServers               = @($dnsServer)
+        DefenderStartOffset      = $defenderStartOffset
+        AttackerIP               = $attackerIP
         UserProfiles    = Get-CASUserProfiles -Difficulty $Difficulty
         AttackerVMName            = $AttackerVMName
         AttackerSSHUser           = $AttackerSSHUser
@@ -601,6 +617,9 @@ function Start-CASAttackerVM {
         Write-Verbose "Starting attacker VM '$name'..."
         try { Start-VM -Name $name | Out-Null } catch { Write-Warning "Could not start attacker VM '$name': $($_.Exception.Message)" }
     }
+
+    # Attempt network configuration if SSH will be used
+    try { Set-CASAttackerNetwork } catch { Write-Verbose "Attacker network config skipped/failed: $($_.Exception.Message)" }
 }
 
 function Connect-CASVMConsole {
@@ -620,6 +639,140 @@ function Connect-CASVMConsole {
     }
     catch {
         Write-Verbose "Failed to launch vmconnect.exe for '$VMName': $($_.Exception.Message)"
+    }
+}
+
+function Set-CASHostSwitchIP {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SwitchName
+    )
+
+    $cfg = $script:CasConfig
+    if (-not $cfg) { return }
+    $targetIP = $cfg.Gateway
+    $prefix   = $cfg.SubnetPrefixLength
+    $ifaceName = "vEthernet ($SwitchName)"
+
+    try {
+        $current = Get-NetIPAddress -InterfaceAlias $ifaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $targetIP -and $_.PrefixLength -eq $prefix }
+        if (-not $current) {
+            New-NetIPAddress -InterfaceAlias $ifaceName -IPAddress $targetIP -PrefixLength $prefix -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    catch {
+        Write-Verbose "Could not set host switch IP for '$SwitchName': $($_.Exception.Message)"
+    }
+}
+
+function Set-CASVMStaticIP {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][int]$Index
+    )
+
+    $cfg = $script:CasConfig
+    if (-not $cfg -or $cfg.SkipGuestLogon -or -not $cfg.GuestCredential) { return }
+
+    $ip   = "{0}.{1}" -f $cfg.NetworkPrefix, ($cfg.DefenderStartOffset + $Index)
+    $gw   = $cfg.Gateway
+    $mask = $cfg.SubnetPrefixLength
+    $dns  = $cfg.DnsServers
+
+    $scriptBlock = {
+        param($ip,$mask,$gw,$dns)
+        $adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and -not $_.Virtual } | Select-Object -First 1
+        if (-not $adapter) { throw 'No active network adapter found inside guest.' }
+        Try { Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+        Try { Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+        New-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress $ip -PrefixLength $mask -DefaultGateway $gw -ErrorAction Stop | Out-Null
+        if ($dns -and $dns.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $dns -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        Invoke-Command -VMName $VMName -Credential $cfg.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $ip,$mask,$gw,$dns -ErrorAction Stop | Out-Null
+        Write-Verbose "Assigned static IP $ip/$mask to '$VMName'."
+    }
+    catch {
+        Write-Verbose "Failed to assign static IP to '$VMName': $($_.Exception.Message)"
+    }
+}
+
+function Set-CASAttackerNetwork {
+    [CmdletBinding()]
+    param()
+
+    $cfg = $script:CasConfig
+    if (-not $cfg -or -not $cfg.AttackerEnabled) { return }
+
+    $ip   = $cfg.AttackerIP
+    $mask = $cfg.SubnetPrefixLength
+    $gw   = $cfg.Gateway
+    $dns  = $cfg.DnsServers | Select-Object -First 1
+
+    $cmd = @(
+        "sudo ip addr flush dev eth0",
+        "sudo ip addr add $ip/$mask dev eth0",
+        "sudo ip link set eth0 up",
+        "sudo ip route replace default via $gw"
+    )
+    if ($dns) {
+        $cmd += "echo 'nameserver $dns' | sudo tee /etc/resolv.conf > /dev/null"
+    }
+    $joined = ($cmd -join ' && ')
+    [void](Invoke-CASAttackerCommand -Command $joined -Purpose 'AttackerNetworkConfig')
+}
+
+function Remove-CASVM {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName
+    )
+
+    try {
+        $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+        if ($vm) {
+            if ($vm.State -ne 'Off') {
+                Stop-VM -Name $VMName -Force -TurnOff -ErrorAction SilentlyContinue | Out-Null
+            }
+            Remove-VM -Name $VMName -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    catch {
+        Write-Verbose "Failed to remove VM '$VMName': $($_.Exception.Message)"
+    }
+
+    try {
+        if ($script:CasConfig -and $script:CasConfig.DiffDiskRoot) {
+            $diff = Join-Path $script:CasConfig.DiffDiskRoot ("{0}.vhdx" -f $VMName)
+            if (Test-Path $diff) { Remove-Item -Path $diff -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Verbose "Failed to delete disk for '$VMName': $($_.Exception.Message)"
+    }
+}
+
+function Stop-CASAttackerVM {
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:CasConfig -or -not $script:CasConfig.AttackerEnabled) { return }
+    $name = $script:CasConfig.AttackerVMName
+    if (-not $name) { return }
+
+    try {
+        $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+        if ($vm -and $vm.State -eq 'Running') {
+            Write-Verbose "Stopping attacker VM '$name'..."
+            Stop-VM -Name $name -Force -TurnOff -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    catch {
+        Write-Verbose "Failed to stop attacker VM '$name': $($_.Exception.Message)"
     }
 }
 
@@ -685,6 +838,10 @@ function New-CASLab {
     }
 
     if (-not $WhatIfSimulation) {
+        Set-CASHostSwitchIP -SwitchName $cfg.VirtualSwitch
+    }
+
+    if (-not $WhatIfSimulation) {
         Start-CASAttackerVM
     }
 
@@ -739,9 +896,11 @@ function New-CASLab {
             Start-VM -Name $vmName | Out-Null
         }
 
-        if ($cfg.AutoConnectConsole) {
+        if ($cfg.ChallengeMode -or $cfg.AutoConnectConsole) {
             Connect-CASVMConsole -VMName $vmName
         }
+
+        Set-CASVMStaticIP -VMName $vmName -Index $i
 
         # Apply per-VM profile settings inside the guest
         if (-not $cfg.SkipGuestLogon) {
@@ -760,7 +919,7 @@ function New-CASLab {
             }
         }
         elseif ($cfg.DifficultyScript) {
-            Write-Verbose "Skipping difficulty script for '$vmName' (guest logon disabled)."
+            Write-Warning "Guest logon disabled or no credential; skipping security profile for '$vmName'."
         }
     }
 
@@ -789,12 +948,27 @@ function Get-CASVMIP {
         [Parameter(Mandatory)][string]$VMName
     )
 
-    # Simpel: pak eerste IPv4-adres dat niet APIPA is
     $vm = Get-VM -Name $VMName -ErrorAction Stop
+
+    # Try live IPs from Hyper-V
     $ips = (Get-VMNetworkAdapter -VMName $vm.Name).IPAddresses |
            Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and -not $_.StartsWith('169.254.') }
+    $found = $ips | Select-Object -First 1
+    if ($found) { return $found }
 
-    return $ips | Select-Object -First 1
+    if ($script:CasConfig -and $script:CasConfig.AttackerEnabled -and $VMName -eq $script:CasConfig.AttackerVMName -and $script:CasConfig.AttackerIP) {
+        return $script:CasConfig.AttackerIP
+    }
+
+    # Fallback: derive expected static IP from config + suffix number
+    if ($script:CasConfig -and $script:CasConfig.NetworkPrefix) {
+        if ($VMName -match '(\d+)$') {
+            $idx = [int]$Matches[1]
+            $offset = if ($script:CasConfig.DefenderStartOffset) { $script:CasConfig.DefenderStartOffset } else { 100 }
+            $fallbackIp = "{0}.{1}" -f $script:CasConfig.NetworkPrefix, ($offset + $idx)
+            return $fallbackIp
+        }
+    }
 }
 
 function Invoke-CASAttackerCommand {
@@ -929,6 +1103,43 @@ function Invoke-CASGuestNotification {
     }
     catch {
         Write-Verbose "Guest notification failed for '$VMName': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Send-CASDefenderPrompt {
+    <#
+    .SYNOPSIS
+        In-guest prompt for defenders with guidance on actions to take.
+    .DESCRIPTION
+        Uses PowerShell Direct to send a popup and log entry inside the guest.
+        Does not wait for input (to avoid blocking); defenders can respond in their session.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Scenario,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    if (-not $script:CasConfig -or $script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) { return $false }
+
+    $scriptBlock = {
+        param($scenario,$msg)
+        $path = 'C:\CAS'
+        if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+        $logFile = Join-Path $path 'DefenderPrompts.log'
+        $line = "{0:u} [{1}] {2}" -f (Get-Date), $scenario, $msg
+        Add-Content -Path $logFile -Value $line
+        try { msg * $msg } catch {}
+    }
+
+    try {
+        Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $Scenario,$Message -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        Write-Verbose "Defender prompt failed for '$VMName': $($_.Exception.Message)"
         return $false
     }
 }
@@ -1368,6 +1579,8 @@ function Invoke-CASBruteForce {
             $status = if ($attacker.Succeeded) { 'Succeeded' } else { 'Blocked' }
             $detailsOutput = if ($attacker.OutputText.Length -gt 300) { $attacker.OutputText.Substring(0,300) + '...' } else { $attacker.OutputText }
 
+            [void](Send-CASDefenderPrompt -VMName $VMName -Scenario 'BruteForce' -Message "CAS Alert: Brute-force RDP attack detected from Kali ($($attacker.AttackerIP)) targeting $targetIP. Block source, review 4625/4624, enforce lockout.")
+
             Write-CASLog -Scenario 'BruteForce' -VMName $VMName -Status $status `
                 -Message "Brute-force attempt launched from attacker VM against RDP on $targetIP." `
                 -Details ("Origin=AttackerVM; AttackerIP={0}; TargetIP={1}; ExitCode={2}; HydraLog=/tmp/cas-hydra-{3}.log; Output={4}; Delay(s)={5}; Profile(Hardened={6},WeakCreds={7}); {8}" -f $attacker.AttackerIP, $targetIP, $attacker.ExitCode, $VMName, $detailsOutput, $delay, $vmProfile.Hardened, $vmProfile.WeakCreds, $edu)
@@ -1384,6 +1597,7 @@ function Invoke-CASBruteForce {
         }
         else {
             [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Simulated brute-force attack underway on this VM.")
+            [void](Send-CASDefenderPrompt -VMName $VMName -Scenario 'BruteForce' -Message "CAS Alert: Simulated brute-force in progress. Actions: disable exposed RDP, reset compromised accounts, enforce lockout, check 4625/4624.")
 
             $scriptBlock = {
                 param($Attempts, $GuestProfile)
@@ -1434,7 +1648,8 @@ function Invoke-CASPrivilegeEscalation {
         Voert een privilege-check uit binnen de VM.
     .DESCRIPTION
         Controleert of de huidige gebruiker adminrechten heeft en logt de
-        relevante info. Geen echte exploit, puur detectie/demo.
+        relevante info. Geen echte exploit, puur detectie/demo. Wanneer een
+        aanvaller is geconfigureerd, wordt de check vanaf de Kali VM gestart.
     #>
     [CmdletBinding()]
     param(
@@ -1455,59 +1670,74 @@ function Invoke-CASPrivilegeEscalation {
         } else { $null }
 
         $vmProfile = Get-CASProfile -VMName $VMName
+        $targetIP = Get-CASVMIP -VMName $VMName
+        $attackerNote = $null
 
+        if ($script:CasConfig.AttackerEnabled -and $targetIP) {
+            $attackerCmd = "echo 'Privilege check from Kali against $targetIP (VM $VMName)' >> /tmp/cas-priv-$VMName.log"
+            $attacker = Invoke-CASAttackerCommand -Command $attackerCmd -Purpose "PrivilegeEsc-$VMName"
+            $attackerNote = "AttackerProbe Origin=$($attacker.AttackerIP); TargetIP=$targetIP; ExitCode=$($attacker.ExitCode); Output=$($attacker.OutputText)"
+
+            $status = if ($attacker.Succeeded) { 'Succeeded' } else { 'Blocked' }
+            Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status $status `
+                -Message "Privilege escalation probe from attacker VM against $targetIP." `
+                -Details ("Origin=AttackerVM; {0}; Delay(s)={1}; Profile(Hardened={2}); {3}" -f $attackerNote, $delay, $vmProfile.Hardened, $edu)
+            return
+        }
+
+        # Fallback: guest-side check if attacker not configured or no IP
         if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) {
             Start-Sleep -Seconds $delay
-
             $status = if ($vmProfile.Hardened) { 'Blocked' } else { 'Succeeded' }
-
             Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status $status `
                 -Message "Privilege escalation check skipped guest login on $VMName." `
-                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1}); {2}" -f $delay, $vmProfile.Hardened, $edu)
+                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1}); {2}; {3}" -f $delay, $vmProfile.Hardened, $edu, $attackerNote)
+            return
         }
-        else {
-            $scriptBlock = {
-                $path = 'C:\CAS'
-                if (-not (Test-Path $path)) {
-                    New-Item -ItemType Directory -Path $path -Force | Out-Null
-                }
 
-                $logFile = Join-Path $path 'PrivilegeEscalationSimulation.log'
-
-                $isAdmin = ([Security.Principal.WindowsPrincipal] `
-                    [Security.Principal.WindowsIdentity]::GetCurrent()
-                ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-
-                $groups  = (whoami /groups) 2>$null
-                $whoami  = (whoami) 2>$null
-
-                $line = "{0:u} PRIV_CHECK User={1}; IsAdmin={2}" -f (Get-Date), $whoami, $isAdmin
-                Add-Content -Path $logFile -Value $line
-                Add-Content -Path $logFile -Value '--- GROUPS ---'
-                $groups | ForEach-Object { Add-Content -Path $logFile -Value $_ }
-
-                [pscustomobject]@{
-                    User    = $whoami
-                    IsAdmin = $isAdmin
-                    LogFile = $logFile
-                }
+        $scriptBlock = {
+            $path = 'C:\CAS'
+            if (-not (Test-Path $path)) {
+                New-Item -ItemType Directory -Path $path -Force | Out-Null
             }
 
-            $info = Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ErrorAction Stop
+            $logFile = Join-Path $path 'PrivilegeEscalationSimulation.log'
 
-            Start-Sleep -Seconds $delay
+            $isAdmin = ([Security.Principal.WindowsPrincipal] `
+                [Security.Principal.WindowsIdentity]::GetCurrent()
+            ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
-            $status  = if ($vmProfile.Hardened -and -not $info.IsAdmin) { 'Blocked' } else { 'Succeeded' }
-            $message = if ($info.IsAdmin) {
-                "Privilege escalation check: user $($info.User) has admin rights."
-            } else {
-                "Privilege escalation check: user $($info.User) has no admin rights."
+            $groups  = (whoami /groups) 2>$null
+            $whoami  = (whoami) 2>$null
+
+            $line = "{0:u} PRIV_CHECK User={1}; IsAdmin={2}" -f (Get-Date), $whoami, $isAdmin
+            Add-Content -Path $logFile -Value $line
+            Add-Content -Path $logFile -Value '--- GROUPS ---'
+            $groups | ForEach-Object { Add-Content -Path $logFile -Value $_ }
+
+            [pscustomobject]@{
+                User    = $whoami
+                IsAdmin = $isAdmin
+                LogFile = $logFile
             }
-
-            Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status $status `
-                -Message $message `
-                -Details ("GuestLog={0}; Delay(s)={1}; {2}" -f $info.LogFile, $delay, $edu)
         }
+
+        $info = Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ErrorAction Stop
+
+        Start-Sleep -Seconds $delay
+
+        $status  = if ($vmProfile.Hardened -and -not $info.IsAdmin) { 'Blocked' } else { 'Succeeded' }
+        $message = if ($info.IsAdmin) {
+            "Privilege escalation check: user $($info.User) has admin rights."
+        } else {
+            "Privilege escalation check: user $($info.User) has no admin rights."
+        }
+
+        Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status $status `
+            -Message $message `
+            -Details ("GuestLog={0}; Delay(s)={1}; {2}; {3}" -f $info.LogFile, $delay, $edu, $attackerNote)
+
+        [void](Send-CASDefenderPrompt -VMName $VMName -Scenario 'PrivilegeEscalation' -Message "CAS Alert: Privilege check findings on $VMName. Verify admin group membership, review event 4672/4624, remove unexpected admins.")
     }
     catch {
         Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status 'Failed' `
@@ -1566,6 +1796,7 @@ function Invoke-CASPortScan {
             else {
                 [void](Send-CASAttackerTargetInfo -VMName $VMName -TargetIP $targetIP)
                 [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Network scan detected from attacker VM.")
+                [void](Send-CASDefenderPrompt -VMName $VMName -Scenario 'PortScan' -Message "CAS Alert: Port scan from attacker VM targeting $targetIP. Actions: capture traffic, block source, verify firewall for 22/80/445/3389/5985.")
             }
         }
 
@@ -1603,11 +1834,15 @@ function Invoke-CASPortScan {
         else {
             $targetIP = Get-CASVMIP -VMName $VMName
             if (-not $targetIP) {
-                throw "Could not determine IP address for VM '$VMName'."
+                Write-Warning "PortScan: Could not determine IP address for VM '$VMName'."
+                Write-CASLog -Scenario 'PortScan' -VMName $VMName -Status 'Failed' `
+                    -Message "Port scan skipped; no IP for $VMName." `
+                    -Details ("TargetIP=Unknown; PortsChecked={0}; Profile(Hardened={1}); {2}" -f ($ports -join ','), $vmProfile.Hardened, $edu)
+                return
             }
-            else {
-                [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Simulated port scan in progress on this VM.")
-            }
+
+            [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Simulated port scan in progress on this VM.")
+            [void](Send-CASDefenderPrompt -VMName $VMName -Scenario 'PortScan' -Message "CAS Alert: Simulated port scan hitting $targetIP. Check firewall, block source, gather netstat/Test-NetConnection evidence.")
 
             $openPorts = @()
             foreach ($p in $ports) {
@@ -1854,17 +2089,38 @@ function Invoke-CASSimulation {
 
         $jobResults = Receive-Job -Job $jobs -Wait -AutoRemoveJob
         if ($jobResults) { $results += $jobResults }
+
+        foreach ($jr in $jobResults) {
+            if ($jr -and $jr.Status -eq 'Succeeded') {
+                Remove-CASVM -VMName $jr.VMName
+            }
+        }
+
+        Stop-CASAttackerVM
     }
     else {
+        $deleted = New-Object 'System.Collections.Generic.HashSet[string]'
+
         foreach ($t in $targets) {
+            if ($deleted.Contains($t.VMName)) {
+                Write-Verbose "Skipping $($t.Attack) for '$($t.VMName)' (VM already removed after successful compromise)."
+                continue
+            }
+
             $res = Invoke-CASScenario -Name $t.Attack -VMName $t.VMName
             if ($res) {
                 $results += $res
+
+                if ($res.Status -eq 'Succeeded') {
+                    Write-Verbose "Compromise detected ($($t.Attack)) on '$($t.VMName)'; removing VM."
+                    Remove-CASVM -VMName $t.VMName
+                    $deleted.Add($t.VMName) | Out-Null
+                }
             }
-            if ($cfg.ChallengeMode) {
-                Get-CASOperatorResponse -Scenario $t.Attack -VMName $t.VMName
-            }
+            # Challenge mode prompts inside guest; no local terminal question
         }
+
+        Stop-CASAttackerVM
     }
 
     return $results
