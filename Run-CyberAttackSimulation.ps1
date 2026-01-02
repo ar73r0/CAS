@@ -41,6 +41,8 @@ param(
 
     [string]$ISOPath,
 
+    [switch]$AutoConnectConsole,
+
     # Optional attacker (e.g. Kali) to run real network attacks from
     [string]$AttackerVMName,
     [string]$AttackerSSHUser,
@@ -63,29 +65,13 @@ if (-not $PSBoundParameters.ContainsKey('NumberOfVMs')) {
 
 # Default Base VM image if none provided
 if (-not $PSBoundParameters.ContainsKey('VHDPath')) {
-    $candidates = @(
-        Join-Path $PSScriptRoot 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx',
-        Join-Path $PSScriptRoot 'VMS\PatientZero\PatientZero.vhdx',
-        Join-Path $PSScriptRoot 'PatientZero.vhdx'
-    )
-
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) { $VHDPath = $candidate; break }
-    }
-
-    if (-not $VHDPath) {
-        $patientZero = Get-ChildItem -Path (Join-Path $PSScriptRoot 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($patientZero) { $VHDPath = $patientZero.FullName }
-    }
+    $defaultVhdPath = Get-CASDefaultVHDPath
+    if ($defaultVhdPath) { $VHDPath = $defaultVhdPath }
 }
 # Default ISO if no valid VHD is present; will be attached for install/boot
 if (-not $PSBoundParameters.ContainsKey('ISOPath')) {
-    $defaultIsoDir = Join-Path $PSScriptRoot 'VMS\ISO'
-    if (Test-Path $defaultIsoDir) {
-        $iso = Get-ChildItem -Path $defaultIsoDir -Filter *.iso -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($iso) { $ISOPath = $iso.FullName }
-    }
+    $defaultIsoPath = Get-CASDefaultISOPath
+    if ($defaultIsoPath) { $ISOPath = $defaultIsoPath }
 }
 
 Write-Host "Initializing CAS..." -ForegroundColor Cyan
@@ -99,6 +85,7 @@ Write-Host "Initializing CAS..." -ForegroundColor Cyan
     -ReportPath $ReportPath `
     -VHDPath $VHDPath `
     -ISOPath $ISOPath `
+    -AutoConnectConsole:$AutoConnectConsole `
     -AllowGuestLogon:$true `
     -GuestCredential $GuestCredential `
     -AttackerVMName $AttackerVMName `

@@ -39,6 +39,20 @@ Snelle start vanuit een verhoogde PowerShell sessie:
 - Gebruik `test-launchvhdx.ps1` om een VHDX te testen voordat het volledige lab wordt opgebouwd.
 - Rapporteerresultaten worden opgeslagen in de opgegeven `Reports` map en de loglijn data in JSONL/CSV onder `Logs`.
 
+### VMs bouwen vanaf een ISO (zonder vooraf gemaakte VHDX)
+1. Zet een Windows ISO in de repo of vul het pad in `.env` als `CAS_ISO_PATH=C:\pad\naar\windows.iso`.
+2. Laat `CAS_BASE_VHD_PATH` leeg of verwijder de regel zodat er geen base image wordt verwacht.
+3. Start de simulatie zonder `-VHDPath`; CAS maakt per VM een lege dynamische VHDX (40GB) in `DiffDisks` en hangt de ISO eraan als bootmedium:
+```powershell
+.\Run-CyberAttackSimulation.ps1 -Difficulty Easy -NumberOfVMs 1 -AllowGuestLogon -GuestCredential (Get-Credential)
+```
+4. De VM boot vanaf de ISO; installeer het OS in de VM. Voor volgende runs kun je het geinstalleerde VHDX-pad in `.env` zetten (`CAS_BASE_VHD_PATH`) of `-VHDPath` meegeven zodat CAS differencing disks daarop baseert.
+
+### Aanvallende VM (Kali)
+- Standaard inlog: gebruiker `kali`, wachtwoord `kali`.
+- Geef de aanvaller door via `-AttackerVMName` en `-AttackerSSHUser kali` (en eventueel `-AttackerSSHPrivateKeyPath`).
+- De Kali-VM wordt automatisch gestart als deze is geconfigureerd.
+
 ## Projectstructuur
 - `Run-CyberAttackSimulation.ps1`: entrypoint dat de module importeert en het volledige proces (initialisatie ➜ provisioning ➜ scenario's ➜ rapportage) start.
 - `CyberAttackSimulator.Core.psm1`: kernmodule met configuratiebeheer, Hyper-V provisioning, scenario-implementaties, logging en rapportage.

@@ -66,9 +66,9 @@ function Get-CASEnv {
     $dotenvPath = Join-Path $root '.env'
 
     if (Test-Path $dotenvPath) {
-        Get-Content -Path $dotenvPath | ForEach-Object {
-            $line = $_.Trim()
-            if (-not $line -or $line.StartsWith('#')) { return }
+        foreach ($line in (Get-Content -Path $dotenvPath)) {
+            $line = $line.Trim()
+            if (-not $line -or $line.StartsWith('#')) { continue }
             $kv = $line.Split('=',2)
             if ($kv.Count -eq 2) {
                 $key = $kv[0].Trim()
@@ -90,6 +90,60 @@ function Get-CASEnvValue {
     $envTable = Get-CASEnv
     if ($envTable.ContainsKey($Key)) { return $envTable[$Key] }
     return $Default
+}
+
+function Resolve-CASPathFromRoot {
+    param([Parameter(Mandatory)][string]$Path)
+    $root = Get-CASModuleRoot
+    if ([System.IO.Path]::IsPathRooted($Path)) { return $Path }
+    return (Join-Path $root $Path)
+}
+
+function New-CASPathStatus {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Path,
+        [string]$Raw,
+        [string]$Description,
+        [switch]$Directory
+    )
+
+    $exists = $false
+    if ($Path) {
+        $type = if ($Directory) { 'Container' } else { 'Leaf' }
+        $exists = Test-Path -Path $Path -PathType $type
+    }
+
+    [pscustomobject]@{
+        Name        = $Name
+        Raw         = $Raw
+        Path        = $Path
+        Exists      = $exists
+        Description = $Description
+    }
+}
+
+function Get-CASPathDiagnostics {
+    param(
+        [Parameter(Mandatory)][psobject]$Config,
+        [string]$EnvBaseVhdRaw,
+        [string]$EnvBaseVhdResolved,
+        [string]$EnvIsoRaw,
+        [string]$EnvIsoResolved
+    )
+
+    $items = @()
+    $items += New-CASPathStatus -Name 'CAS_BASE_VHD_PATH (.env)' -Raw $EnvBaseVhdRaw -Path $EnvBaseVhdResolved -Description 'Env override for base image'
+    $items += New-CASPathStatus -Name 'CAS_ISO_PATH (.env)' -Raw $EnvIsoRaw -Path $EnvIsoResolved -Description 'Env override for ISO'
+    $items += New-CASPathStatus -Name 'VHDPath' -Path $Config.VHDPath -Description 'Active base image for labs'
+    $items += New-CASPathStatus -Name 'ISOPath' -Path $Config.ISOPath -Description 'ISO attached when base image is missing'
+    $items += New-CASPathStatus -Name 'DiffDiskRoot' -Path $Config.DiffDiskRoot -Directory -Description 'Differencing disks folder'
+    $items += New-CASPathStatus -Name 'LogRoot' -Path $Config.LogRoot -Directory -Description 'Logs output folder'
+    $items += New-CASPathStatus -Name 'ReportRoot' -Path $Config.ReportRoot -Directory -Description 'Reports output folder'
+    $items += New-CASPathStatus -Name 'DifficultyScript' -Path $Config.DifficultyScript -Description 'Difficulty initialization script'
+    $items += New-CASPathStatus -Name 'AttackerSSHPrivateKeyPath' -Path $Config.AttackerSSHPrivateKeyPath -Description 'SSH key for attacker VM'
+
+    return $items
 }
 
 function New-CASDirectory {
@@ -193,8 +247,22 @@ function Get-CASModuleRoot {
 
 function Get-CASDefaultVHDPath {
     $root = Get-CASModuleRoot
+
+    $envVhd = Get-CASEnvValue -Key 'CAS_BASE_VHD_PATH'
+    if ($envVhd) {
+        $envCandidate = Resolve-CASPathFromRoot -Path $envVhd
+
+        if (Test-Path $envCandidate) {
+            return (Resolve-Path $envCandidate).ProviderPath
+        }
+        else {
+            Write-Warning "CAS_BASE_VHD_PATH in .env points to '$envCandidate' but the file was not found."
+        }
+    }
+
     $candidates = @(
         Join-Path $root 'PatientZero.vhdx'
+        Join-Path $root 'BaseVM.vhdx'
     )
 
     foreach ($candidate in $candidates) {
@@ -203,20 +271,26 @@ function Get-CASDefaultVHDPath {
         }
     }
 
-    $patientZero = Get-ChildItem -Path (Join-Path $root 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
+    $firstVhdx = Get-ChildItem -Path $root -Filter *.vhdx -Recurse -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
-    if ($patientZero) {
-        return $patientZero.FullName
-    }
+    if ($firstVhdx) { return $firstVhdx.FullName }
 }
 
 function Get-CASDefaultISOPath {
     $root = Get-CASModuleRoot
-    $isoDir = Join-Path $root 'VMS\ISO'
-    if (Test-Path $isoDir) {
-        $iso = Get-ChildItem -Path $isoDir -Filter *.iso -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($iso) { return $iso.FullName }
+    $envIso = Get-CASEnvValue -Key 'CAS_ISO_PATH'
+    if ($envIso) {
+        $envCandidate = Resolve-CASPathFromRoot -Path $envIso
+        if (Test-Path $envCandidate) {
+            return (Resolve-Path $envCandidate).ProviderPath
+        }
+        else {
+            Write-Warning "CAS_ISO_PATH in .env points to '$envCandidate' but the file was not found."
+        }
     }
+
+    $iso = Get-ChildItem -Path $root -Filter *.iso -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($iso) { return $iso.FullName }
 }
 
 function Get-CASDifficultyScriptPath {
@@ -350,6 +424,7 @@ function Initialize-CASSimulator {
         # Host-only standaard; override met -AllowGuestLogon en GuestCredential om PowerShell Direct te proberen
         [Parameter()][switch]$AllowGuestLogon,
         [Parameter()][System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter()][switch]$AutoConnectConsole,
 
         # Optioneel: configureer een aparte aanvaller (bijv. Kali) die via SSH commando's uitvoert
         [Parameter()][string]$AttackerVMName,
@@ -378,9 +453,13 @@ function Initialize-CASSimulator {
     # Default: attempt guest logon/profile application; if no credential, PS Direct will run in host context
     $skipGuest  = $false
 
+    $envBaseVhdRaw = Get-CASEnvValue -Key 'CAS_BASE_VHD_PATH'
+    $envBaseVhdResolved = if ($envBaseVhdRaw) { Resolve-CASPathFromRoot -Path $envBaseVhdRaw } else { $null }
+    $envIsoRaw = Get-CASEnvValue -Key 'CAS_ISO_PATH'
+    $envIsoResolved = if ($envIsoRaw) { Resolve-CASPathFromRoot -Path $envIsoRaw } else { $null }
+
     $resolvedVhdPath = $null
     $baseVhdUsable = $false
-    $diffDiskRoot = $null
     $diffDiskRoot = $null
 
     if ($VHDPath) {
@@ -417,15 +496,7 @@ function Initialize-CASSimulator {
         $diffDiskRoot = Join-Path $parentDir 'DiffDisks'
     }
     else {
-        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
-    }
-
-    if ($resolvedVhdPath) {
-        $parentDir = Split-Path -Path $resolvedVhdPath -Parent
-        $diffDiskRoot = Join-Path $parentDir 'DiffDisks'
-    }
-    else {
-        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
+        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'DiffDisks'
     }
 
     $resolvedIsoPath = $null
@@ -479,12 +550,14 @@ function Initialize-CASSimulator {
         EducationalMode = $EducationalMode.IsPresent
         ChallengeMode   = $ChallengeMode.IsPresent
         DifficultyScript= $difficultyScript
+        AutoConnectConsole       = $AutoConnectConsole.IsPresent
         UserProfiles    = Get-CASUserProfiles -Difficulty $Difficulty
         AttackerVMName            = $AttackerVMName
         AttackerSSHUser           = $AttackerSSHUser
         AttackerSSHPrivateKeyPath = $resolvedAttackerKey
         AttackerSSHPort           = $AttackerSSHPort
         AttackerEnabled           = $attackerEnabled
+        PathDiagnostics           = @()
     }
 
     # Build per-VM profiles for defenses/countermeasures
@@ -497,6 +570,11 @@ function Initialize-CASSimulator {
         $script:CasSessionId = (Get-Date).ToString('yyyyMMdd-HHmmss')
     }
 
+    $script:CasConfig.PathDiagnostics = Get-CASPathDiagnostics -Config $script:CasConfig -EnvBaseVhdRaw $envBaseVhdRaw -EnvBaseVhdResolved $envBaseVhdResolved -EnvIsoRaw $envIsoRaw -EnvIsoResolved $envIsoResolved
+    foreach ($pd in $script:CasConfig.PathDiagnostics | Where-Object { $_.Path -and -not $_.Exists }) {
+        Write-Warning "Path missing: $($pd.Name) -> $($pd.Path)"
+    }
+
     Write-Verbose "CAS initialized. SessionId: $($script:CasSessionId)"
     return $script:CasConfig
 }
@@ -504,6 +582,46 @@ function Initialize-CASSimulator {
 #endregion Initialization & Validation
 
 #region VM Provisioning (Hyper-V skeleton)
+
+function Start-CASAttackerVM {
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:CasConfig -or -not $script:CasConfig.AttackerEnabled) { return }
+    $name = $script:CasConfig.AttackerVMName
+    if (-not $name) { return }
+
+    $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        Write-Warning "Attacker VM '$name' not found. Skipping attacker start."
+        return
+    }
+
+    if ($vm.State -ne 'Running') {
+        Write-Verbose "Starting attacker VM '$name'..."
+        try { Start-VM -Name $name | Out-Null } catch { Write-Warning "Could not start attacker VM '$name': $($_.Exception.Message)" }
+    }
+}
+
+function Connect-CASVMConsole {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName
+    )
+
+    $vmconnect = Join-Path $env:SystemRoot 'System32\vmconnect.exe'
+    if (-not (Test-Path $vmconnect)) {
+        Write-Verbose "vmconnect.exe not found; cannot auto-connect to console for '$VMName'."
+        return
+    }
+
+    try {
+        Start-Process -FilePath $vmconnect -ArgumentList 'localhost', $VMName -WindowStyle Normal | Out-Null
+    }
+    catch {
+        Write-Verbose "Failed to launch vmconnect.exe for '$VMName': $($_.Exception.Message)"
+    }
+}
 
 function New-CASVirtualSwitch {
     [CmdletBinding()]
@@ -566,6 +684,10 @@ function New-CASLab {
         Write-Verbose "[WhatIf] Would create Hyper-V switch '$($cfg.VirtualSwitch)'."
     }
 
+    if (-not $WhatIfSimulation) {
+        Start-CASAttackerVM
+    }
+
     $vmNames = @()
 
     for ($i = 1; $i -le $cfg.NumberOfVMs; $i++) {
@@ -615,6 +737,10 @@ function New-CASLab {
         if ((Get-VM -Name $vmName).State -ne 'Running') {
             Write-Verbose "Starting VM '$vmName'..."
             Start-VM -Name $vmName | Out-Null
+        }
+
+        if ($cfg.AutoConnectConsole) {
+            Connect-CASVMConsole -VMName $vmName
         }
 
         # Apply per-VM profile settings inside the guest
@@ -752,6 +878,58 @@ function Invoke-CASAttackerCommand {
         AttackerIP = $attackerIP
         Purpose    = $Purpose
         Skipped    = $false
+    }
+}
+
+function Send-CASAttackerTargetInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$TargetIP
+    )
+
+    if (-not $script:CasConfig) {
+        throw 'CAS configuration is not initialized. Call Initialize-CASSimulator first.'
+    }
+    if (-not $script:CasConfig.AttackerEnabled) {
+        return $null
+    }
+
+    $cmd = "echo ""$VMName,$TargetIP"" >> /tmp/cas-targets.txt"
+    return Invoke-CASAttackerCommand -Command $cmd -Purpose "RecordTarget-$VMName"
+}
+
+function Invoke-CASGuestNotification {
+    <#
+    .SYNOPSIS
+        Tries to show a popup-style notification inside the guest VM.
+    .DESCRIPTION
+        Uses PowerShell Direct with the configured guest credential. Falls back
+        to writing an Alerts.log entry when UI popups are not possible.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    if (-not $script:CasConfig) { return $false }
+    if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) { return $false }
+
+    try {
+        $scriptBlock = {
+            param($msg)
+            try { msg * $msg } catch {}
+            $path = 'C:\CAS'
+            if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+            Add-Content -Path (Join-Path $path 'Alerts.log') -Value ("{0:u} {1}" -f (Get-Date), $msg)
+        }
+        Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $Message -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        Write-Verbose "Guest notification failed for '$VMName': $($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -1168,6 +1346,10 @@ function Invoke-CASBruteForce {
             if (-not $targetIP) {
                 Write-Verbose "Attacker VM configured but no IP found for '$VMName'; falling back to host-only simulation."
             }
+            else {
+                [void](Send-CASAttackerTargetInfo -VMName $VMName -TargetIP $targetIP)
+                [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Real brute-force attack incoming from attacker VM.")
+            }
         }
 
         if ($script:CasConfig.AttackerEnabled -and $targetIP) {
@@ -1201,6 +1383,8 @@ function Invoke-CASBruteForce {
                 -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1},WeakCreds={2}); {3}" -f $delay, $vmProfile.Hardened, $vmProfile.WeakCreds, $edu)
         }
         else {
+            [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Simulated brute-force attack underway on this VM.")
+
             $scriptBlock = {
                 param($Attempts, $GuestProfile)
 
@@ -1379,6 +1563,10 @@ function Invoke-CASPortScan {
             if (-not $targetIP) {
                 Write-Verbose "Attacker VM configured but no IP found for '$VMName'; falling back to host path."
             }
+            else {
+                [void](Send-CASAttackerTargetInfo -VMName $VMName -TargetIP $targetIP)
+                [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Network scan detected from attacker VM.")
+            }
         }
 
         if ($useAttacker -and $targetIP) {
@@ -1416,6 +1604,9 @@ function Invoke-CASPortScan {
             $targetIP = Get-CASVMIP -VMName $VMName
             if (-not $targetIP) {
                 throw "Could not determine IP address for VM '$VMName'."
+            }
+            else {
+                [void](Invoke-CASGuestNotification -VMName $VMName -Message "CAS Alert: Simulated port scan in progress on this VM.")
             }
 
             $openPorts = @()
