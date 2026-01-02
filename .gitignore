@@ -1,0 +1,15 @@
+/Logs/
+/Reports/
+*.log
+*.csv
+*.json
+*.html
+/DiffDisks/
+.env
+
+*.vhdx
+PatientZero.vhdx
+*.pdf
+
+/VMS/
+/VM/

@@ -28,8 +28,8 @@ param(
     [switch]$WhatIfSimulation,
 
     # Host-only is default; use -AllowGuestLogon to attempt PowerShell Direct into guests
-    [switch]$AllowGuestLogon,
-    [System.Management.Automation.PSCredential]$GuestCredential,
+[switch]$AllowGuestLogon,  # kept for compatibility; guest logon now on by default when possible
+[System.Management.Automation.PSCredential]$GuestCredential,
 
     [string]$SIEMEndpoint,
 
@@ -39,7 +39,13 @@ param(
 
     [string]$VHDPath,
 
-    [string]$ISOPath
+    [string]$ISOPath,
+
+    # Optional attacker (e.g. Kali) to run real network attacks from
+    [string]$AttackerVMName,
+    [string]$AttackerSSHUser,
+    [string]$AttackerSSHPrivateKeyPath,
+    [int]$AttackerSSHPort = 22
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,8 +63,21 @@ if (-not $PSBoundParameters.ContainsKey('NumberOfVMs')) {
 
 # Default Base VM image if none provided
 if (-not $PSBoundParameters.ContainsKey('VHDPath')) {
-    $defaultVhdPath = Join-Path $PSScriptRoot 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx'
-    if (Test-Path $defaultVhdPath) { $VHDPath = $defaultVhdPath }
+    $candidates = @(
+        Join-Path $PSScriptRoot 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx',
+        Join-Path $PSScriptRoot 'VMS\PatientZero\PatientZero.vhdx',
+        Join-Path $PSScriptRoot 'PatientZero.vhdx'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { $VHDPath = $candidate; break }
+    }
+
+    if (-not $VHDPath) {
+        $patientZero = Get-ChildItem -Path (Join-Path $PSScriptRoot 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($patientZero) { $VHDPath = $patientZero.FullName }
+    }
 }
 # Default ISO if no valid VHD is present; will be attached for install/boot
 if (-not $PSBoundParameters.ContainsKey('ISOPath')) {
@@ -71,7 +90,7 @@ if (-not $PSBoundParameters.ContainsKey('ISOPath')) {
 
 Write-Host "Initializing CAS..." -ForegroundColor Cyan
 
-$config = Initialize-CASSimulator -Difficulty $Difficulty `
+[void](Initialize-CASSimulator -Difficulty $Difficulty `
     -NumberOfVMs $NumberOfVMs `
     -AttackTypes $AttackTypes `
     -LabPrefix $LabPrefix `
@@ -80,18 +99,22 @@ $config = Initialize-CASSimulator -Difficulty $Difficulty `
     -ReportPath $ReportPath `
     -VHDPath $VHDPath `
     -ISOPath $ISOPath `
-    -AllowGuestLogon:$AllowGuestLogon `
+    -AllowGuestLogon:$true `
     -GuestCredential $GuestCredential `
+    -AttackerVMName $AttackerVMName `
+    -AttackerSSHUser $AttackerSSHUser `
+    -AttackerSSHPrivateKeyPath $AttackerSSHPrivateKeyPath `
+    -AttackerSSHPort $AttackerSSHPort `
     -SIEMEndpoint $SIEMEndpoint `
     -EducationalMode:$EducationalMode `
     -ChallengeMode:$ChallengeMode `
-    -Verbose
+    -Verbose)
 
 Write-Host "Creating lab VMs..." -ForegroundColor Cyan
 $vmNames = New-CASLab -WhatIfSimulation:$WhatIfSimulation.IsPresent -Verbose
 
 Write-Host "Running scenarios..." -ForegroundColor Cyan
-$results = Invoke-CASSimulation -VMNames $vmNames -AttackTypes $AttackTypes -Parallel:$Parallel.IsPresent -Verbose
+[void](Invoke-CASSimulation -VMNames $vmNames -AttackTypes $AttackTypes -Parallel:$Parallel.IsPresent -Verbose)
 
 Write-Host "Generating report..." -ForegroundColor Cyan
 $report = New-CASReport -Format Html -Verbose

@@ -1,5 +1,0 @@
-"SessionId","Scenario","VMName","Timestamp","Difficulty","Status","Message","Details"
-"20251210-165942","BruteForce","CAS-LAB-01","10/12/2025 16:59:53","Easy","Succeeded","Simulated brute-force (5 attempts) on CAS-LAB-01 (guest login skipped).","GuestLog=Skipped; Delay(s)=1; Profile(Hardened=False,WeakCreds=True); "
-"20251210-165942","PrivilegeEscalation","CAS-LAB-01","10/12/2025 16:59:54","Easy","Succeeded","Privilege escalation check skipped guest login on CAS-LAB-01.","GuestLog=Skipped; Delay(s)=1; Profile(Hardened=False); "
-"20251210-165942","PortScan","CAS-LAB-01","10/12/2025 16:59:55","Easy","Succeeded","Port scan skipped guest access for CAS-LAB-01.","TargetIP=Skipped; PortsChecked=Skipped; ExpectedOpen=3389,445,5985; Delay(s)=1; Profile(Hardened=False) ; "
-"20251210-165942","LateralMovement","CAS-LAB-01","10/12/2025 16:59:56","Easy","Succeeded","Simulated lateral movement hops on CAS-LAB-01 (host-only).","Hops=RDP:3389->ServiceAccount|SMB:445->AdminShare; GuestLog=Skipped; Delay(s)=1; Profile(Hardened=False); "

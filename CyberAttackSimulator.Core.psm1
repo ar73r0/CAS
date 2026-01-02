@@ -20,6 +20,8 @@ $script:CasConfig      = $null
 $script:CasModulePath  = $MyInvocation.MyCommand.Path
 $script:CasChallenges  = $null
 $script:CasProfiles    = @{}
+$script:CasUserProfiles= @()
+$script:CasEnv         = $null
 
 class CasScenarioResult {
     [string]$SessionId
@@ -35,6 +37,60 @@ class CasScenarioResult {
 #endregion Globals & Types
 
 #region Helper: Logging & Paths
+
+function Write-CASFileSafe {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()]$Content,
+        [int]$Retries = 3,
+        [int]$DelayMs = 200
+    )
+
+    for ($i=1; $i -le $Retries; $i++) {
+        try {
+            $Content | Out-File -FilePath $Path -Encoding utf8 -Append
+            return
+        }
+        catch {
+            if ($i -eq $Retries) { throw }
+            Start-Sleep -Milliseconds $DelayMs
+        }
+    }
+}
+
+function Get-CASEnv {
+    if ($null -ne $script:CasEnv) { return $script:CasEnv }
+
+    $envTable = @{}
+    $root = Get-CASModuleRoot
+    $dotenvPath = Join-Path $root '.env'
+
+    if (Test-Path $dotenvPath) {
+        Get-Content -Path $dotenvPath | ForEach-Object {
+            $line = $_.Trim()
+            if (-not $line -or $line.StartsWith('#')) { return }
+            $kv = $line.Split('=',2)
+            if ($kv.Count -eq 2) {
+                $key = $kv[0].Trim()
+                $val = $kv[1]
+                $envTable[$key] = $val
+            }
+        }
+    }
+
+    $script:CasEnv = $envTable
+    return $script:CasEnv
+}
+
+function Get-CASEnvValue {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter()][string]$Default
+    )
+    $envTable = Get-CASEnv
+    if ($envTable.ContainsKey($Key)) { return $envTable[$Key] }
+    return $Default
+}
 
 function New-CASDirectory {
     [CmdletBinding()]
@@ -81,14 +137,13 @@ function Write-CASLog {
     $jsonFile = Join-Path $logRoot "CAS-Log-$($script:CasSessionId).jsonl"
     $csvFile  = Join-Path $logRoot "CAS-Log-$($script:CasSessionId).csv"
 
-    $result | ConvertTo-Json -Depth 5 -Compress | Add-Content -Path $jsonFile
+    $jsonLine = $result | ConvertTo-Json -Depth 5 -Compress
+    Write-CASFileSafe -Path $jsonFile -Content $jsonLine
 
-    if (-not (Test-Path $csvFile)) {
-        $result | Export-Csv -NoTypeInformation -Path $csvFile
-    }
-    else {
-        $result | Export-Csv -NoTypeInformation -Path $csvFile -Append
-    }
+    $csvExists = Test-Path $csvFile
+    $csvLines  = $result | ConvertTo-Csv -NoTypeInformation
+    if ($csvExists) { $csvLines = $csvLines | Select-Object -Skip 1 }
+    Write-CASFileSafe -Path $csvFile -Content $csvLines
 
     # Forward stub to SIEM (file/URI placeholder)
     if ($script:CasConfig.SIEMEndpoint) {
@@ -138,9 +193,20 @@ function Get-CASModuleRoot {
 
 function Get-CASDefaultVHDPath {
     $root = Get-CASModuleRoot
-    $candidate = Join-Path $root 'VMS\BaseVM\Virtual Hard Disks\BaseVM.vhdx'
-    if (Test-Path $candidate) {
-        return (Resolve-Path $candidate).ProviderPath
+    $candidates = @(
+        Join-Path $root 'PatientZero.vhdx'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).ProviderPath
+        }
+    }
+
+    $patientZero = Get-ChildItem -Path (Join-Path $root 'VMS') -Filter 'PatientZero.vhdx' -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($patientZero) {
+        return $patientZero.FullName
     }
 }
 
@@ -206,6 +272,31 @@ function New-CASDiffDisk {
 }
 
 function Initialize-CASSimulator {
+    <#
+    .SYNOPSIS
+        Initialiseert de globale CAS-configuratie en valideert prerequisites.
+
+    .DESCRIPTION
+        Berekent log- en rapportpaden, zoekt naar standaard VHD/ISO beelden en
+        slaat alle instellingen op in het module-brede $script:CasConfig
+        object. Deze functie moet één keer per sessie worden aangeroepen vóór
+        provisioning of scenario-uitvoering.
+
+    .PARAMETER Difficulty
+        De gewenste moeilijkheidsgraad (Easy/Medium/Hard) die bepaalt welke
+        profielen en scenario-varianten gebruikt worden.
+
+    .PARAMETER NumberOfVMs
+        Aantal virtuele machines dat wordt uitgerold in de labomgeving.
+
+    .PARAMETER VHDPath
+        Optioneel pad naar een bestaande base image. Indien leeg wordt een
+        default pad gezocht binnen de repo.
+
+    .OUTPUTS
+        Pscustomobject met de volledige CAS-configuratie die elders hergebruikt
+        wordt.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('Easy','Medium','Hard')]
@@ -235,6 +326,12 @@ function Initialize-CASSimulator {
         [Parameter()][switch]$AllowGuestLogon,
         [Parameter()][System.Management.Automation.PSCredential]$GuestCredential,
 
+        # Optioneel: configureer een aparte aanvaller (bijv. Kali) die via SSH commando's uitvoert
+        [Parameter()][string]$AttackerVMName,
+        [Parameter()][string]$AttackerSSHUser,
+        [Parameter()][string]$AttackerSSHPrivateKeyPath,
+        [Parameter()][int]$AttackerSSHPort = 22,
+
         # SIEM/extern endpoint (stub): pad of URI waarheen JSON wordt geforward
         [Parameter()][string]$SIEMEndpoint,
 
@@ -253,12 +350,12 @@ function Initialize-CASSimulator {
 
     $logRoot    = New-CASDirectory -Path $LogPath
     $reportRoot = New-CASDirectory -Path $ReportPath
-    $hasCred    = [bool]$GuestCredential
-    $skipGuest  = -not ($AllowGuestLogon.IsPresent -and $hasCred)
+    # Default: attempt guest logon/profile application; if no credential, PS Direct will run in host context
+    $skipGuest  = $false
 
     $resolvedVhdPath = $null
     $baseVhdUsable = $false
-    $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
+    $diffDiskRoot = $null
 
     if ($VHDPath) {
         if (Test-Path $VHDPath) {
@@ -289,6 +386,14 @@ function Initialize-CASSimulator {
         }
     }
 
+    if ($resolvedVhdPath) {
+        $parentDir = Split-Path -Path $resolvedVhdPath -Parent
+        $diffDiskRoot = Join-Path $parentDir 'DiffDisks'
+    }
+    else {
+        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
+    }
+
     $resolvedIsoPath = $null
     if ($ISOPath) {
         if (Test-Path $ISOPath) {
@@ -310,6 +415,18 @@ function Initialize-CASSimulator {
         Write-Verbose "No difficulty initialization script found for '$Difficulty'."
     }
 
+    $resolvedAttackerKey = $null
+    if ($AttackerSSHPrivateKeyPath) {
+        if (Test-Path $AttackerSSHPrivateKeyPath) {
+            $resolvedAttackerKey = (Resolve-Path $AttackerSSHPrivateKeyPath).ProviderPath
+        }
+        else {
+            Write-Warning "AttackerSSHPrivateKeyPath '$AttackerSSHPrivateKeyPath' not found."
+        }
+    }
+
+    $attackerEnabled = -not [string]::IsNullOrWhiteSpace($AttackerVMName) -and -not [string]::IsNullOrWhiteSpace($AttackerSSHUser)
+
     $script:CasConfig = [pscustomobject]@{
         Difficulty      = $Difficulty
         NumberOfVMs     = $NumberOfVMs
@@ -328,6 +445,12 @@ function Initialize-CASSimulator {
         EducationalMode = $EducationalMode.IsPresent
         ChallengeMode   = $ChallengeMode.IsPresent
         DifficultyScript= $difficultyScript
+        UserProfiles    = Get-CASUserProfiles -Difficulty $Difficulty
+        AttackerVMName            = $AttackerVMName
+        AttackerSSHUser           = $AttackerSSHUser
+        AttackerSSHPrivateKeyPath = $resolvedAttackerKey
+        AttackerSSHPort           = $AttackerSSHPort
+        AttackerEnabled           = $attackerEnabled
     }
 
     # Build per-VM profiles for defenses/countermeasures
@@ -364,6 +487,20 @@ function New-CASVirtualSwitch {
 }
 
 function New-CASLab {
+    <#
+    .SYNOPSIS
+        Richt een Hyper-V lab op basis van de huidige CAS-configuratie in.
+
+    .DESCRIPTION
+        Maakt de virtuele switch aan (tenzij WhatIf), creëert per VM een
+        differencing disk op basis van het base image en start de VM. Indien
+        gasttoegang is toegestaan wordt het difficulty-profiel toegepast in de
+        guest.
+
+    .PARAMETER WhatIfSimulation
+        Genereert enkel logische output zonder effectieve Hyper-V acties, zodat
+        runbooks veilig getest kunnen worden.
+    #>
     [CmdletBinding()]
     param(
         [Parameter()][switch]$WhatIfSimulation
@@ -432,14 +569,24 @@ function New-CASLab {
             Start-VM -Name $vmName | Out-Null
         }
 
-        # Apply per-VM profile settings inside the guest if allowed
-        if (-not $cfg.SkipGuestLogon -and $cfg.GuestCredential) {
-            Invoke-CASDifficultyScript -VMName $vmName
-            $profile = Get-CASProfile -VMName $vmName
-            Apply-CASProfileGuest -Profile $profile -Credential $cfg.GuestCredential
+        # Apply per-VM profile settings inside the guest
+        if (-not $cfg.SkipGuestLogon) {
+            try {
+                Invoke-CASDifficultyScript -VMName $vmName
+            }
+            catch {
+                Write-Warning "Difficulty script failed for '$vmName': $($_.Exception.Message)"
+            }
+            try {
+                $vmProfile = Get-CASProfile -VMName $vmName
+                Set-CASProfileGuest -GuestProfile $vmProfile -Credential $cfg.GuestCredential
+            }
+            catch {
+                Write-Warning "Applying VM profile to '$vmName' failed: $($_.Exception.Message)"
+            }
         }
         elseif ($cfg.DifficultyScript) {
-            Write-Verbose "Skipping difficulty script for '$vmName' (guest logon disabled or missing credential)."
+            Write-Verbose "Skipping difficulty script for '$vmName' (guest logon disabled)."
         }
     }
 
@@ -476,6 +623,90 @@ function Get-CASVMIP {
     return $ips | Select-Object -First 1
 }
 
+function Invoke-CASAttackerCommand {
+    <#
+    .SYNOPSIS
+        Voert een commando uit op de aanvaller-VM (bijv. Kali) via SSH.
+    .DESCRIPTION
+        Verwacht dat ssh.exe beschikbaar is op de host en dat de aanvaller-VM
+        bereikbaar is via het interne Hyper-V netwerk.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter()][string]$Purpose = 'Generic'
+    )
+
+    if (-not $script:CasConfig) {
+        throw 'CAS configuration is not initialized. Call Initialize-CASSimulator first.'
+    }
+
+    $cfg = $script:CasConfig
+
+    if (-not $cfg.AttackerEnabled) {
+        return [pscustomobject]@{
+            Succeeded  = $false
+            ExitCode   = $null
+            Command    = $Command
+            Output     = @()
+            OutputText = 'Attacker VM not configured.'
+            AttackerIP = $null
+            Purpose    = $Purpose
+            Skipped    = $true
+        }
+    }
+
+    $sshCmd = Get-Command ssh -ErrorAction SilentlyContinue
+    if (-not $sshCmd) {
+        return [pscustomobject]@{
+            Succeeded  = $false
+            ExitCode   = $null
+            Command    = $Command
+            Output     = @()
+            OutputText = 'ssh.exe not found on host.'
+            AttackerIP = $null
+            Purpose    = $Purpose
+            Skipped    = $true
+        }
+    }
+
+    $attackerIP = Get-CASVMIP -VMName $cfg.AttackerVMName
+    if (-not $attackerIP) {
+        return [pscustomobject]@{
+            Succeeded  = $false
+            ExitCode   = $null
+            Command    = $Command
+            Output     = @()
+            OutputText = "Unable to resolve IP for attacker VM '$($cfg.AttackerVMName)'."
+            AttackerIP = $null
+            Purpose    = $Purpose
+            Skipped    = $true
+        }
+    }
+
+    Write-Verbose "Running attacker command '$Purpose' via $($cfg.AttackerVMName) ($attackerIP): $Command"
+
+    $sshArgs = @('-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=NUL','-p', $cfg.AttackerSSHPort)
+    if ($cfg.AttackerSSHPrivateKeyPath) {
+        $sshArgs += @('-i', $cfg.AttackerSSHPrivateKeyPath)
+    }
+    $sshArgs += @("$($cfg.AttackerSSHUser)@$attackerIP", $Command)
+
+    $output = & $sshCmd.Source @sshArgs 2>&1
+    $exitCode = $LASTEXITCODE
+
+    [pscustomobject]@{
+        Succeeded  = ($exitCode -eq 0)
+        ExitCode   = $exitCode
+        Command    = $Command
+        Output     = $output
+        OutputText = ($output -join "`n")
+        AttackerIP = $attackerIP
+        Purpose    = $Purpose
+        Skipped    = $false
+    }
+}
+
 # Scenario library manifest (static for now)
 $script:CasScenarioLibrary = @(
     [pscustomobject]@{ Name='BruteForce'; Difficulty='Easy'; Version='1.0'; Description='Simulated brute-force login attempts' }
@@ -492,13 +723,13 @@ function New-CASProfiles {
         [Parameter(Mandatory)][string]$Difficulty
     )
 
-    $profiles = @{}
+    $vmProfiles = @{}
     for ($i=1; $i -le $NumberOfVMs; $i++) {
         $vmName = "{0}-{1:00}" -f $LabPrefix, $i
 
         switch ($Difficulty) {
             'Easy' {
-                $profile = [pscustomobject]@{
+                $vmProfile = [pscustomobject]@{
                     VMName          = $vmName
                     WeakCreds       = $true
                     AllowRDP        = $true
@@ -508,7 +739,7 @@ function New-CASProfiles {
                 }
             }
             'Medium' {
-                $profile = [pscustomobject]@{
+                $vmProfile = [pscustomobject]@{
                     VMName          = $vmName
                     WeakCreds       = ($i % 2 -eq 1)
                     AllowRDP        = $true
@@ -518,7 +749,7 @@ function New-CASProfiles {
                 }
             }
             'Hard' {
-                $profile = [pscustomobject]@{
+                $vmProfile = [pscustomobject]@{
                     VMName          = $vmName
                     WeakCreds       = $false
                     AllowRDP        = ($i % 2 -eq 0)
@@ -528,7 +759,7 @@ function New-CASProfiles {
                 }
             }
             default {
-                $profile = [pscustomobject]@{
+                $vmProfile = [pscustomobject]@{
                     VMName          = $vmName
                     WeakCreds       = $true
                     AllowRDP        = $true
@@ -539,9 +770,31 @@ function New-CASProfiles {
             }
         }
 
-        $profiles[$vmName] = $profile
+        $vmProfiles[$vmName] = $vmProfile
     }
-    return $profiles
+    return $vmProfiles
+}
+
+function Get-CASUserProfiles {
+    [CmdletBinding()]
+    param(
+        [Parameter()][ValidateSet('Easy','Medium','Hard')]
+        [string]$Difficulty
+    )
+
+    if (-not $script:CasUserProfiles -or $script:CasUserProfiles.Count -eq 0) {
+        $script:CasUserProfiles = @(
+            [pscustomobject]@{ Difficulty='Easy';   Persona='SOC Trainee';     CredentialStrength='Weak';    Notes='Weak defaults to drive detection of bad practices.' },
+            [pscustomobject]@{ Difficulty='Medium'; Persona='Tier-1 Analyst';  CredentialStrength='Moderate'; Notes='Mix of weak and hardened hosts for balanced labs.' },
+            [pscustomobject]@{ Difficulty='Hard';   Persona='Tier-2 Engineer'; CredentialStrength='Strong';   Notes='Hardened baseline with minimal exposed services.' }
+        )
+    }
+
+    $userProfiles = $script:CasUserProfiles
+    if ($Difficulty) {
+        return $userProfiles | Where-Object { $_.Difficulty -eq $Difficulty }
+    }
+    return $userProfiles
 }
 
 function Get-CASProfile {
@@ -558,51 +811,132 @@ function Get-CASProfile {
     }
 }
 
-function Apply-CASProfileGuest {
+function Set-CASProfileGuest {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][psobject]$Profile,
+        [Parameter(Mandatory)][Alias('Profile')][psobject]$GuestProfile,
         [Parameter()][System.Management.Automation.PSCredential]$Credential
     )
 
-    $vm = $Profile.VMName
-    $weakUser = 'casuser'
-    $weakPass = 'P@ssw0rd123'
+    $vm = $GuestProfile.VMName
+    $weakUser = Get-CASEnvValue -Key 'CAS_WEAK_USER' -Default 'casuser'
+    $weakPass = Get-CASEnvValue -Key 'CAS_WEAK_PASS' -Default 'P@ssw0rd123'
 
     $scriptBlock = {
-        param($profile, $user, $pass)
+        param($vmProfile, $user, $pass)
+        
+        # Admin account (fixed)
+        #$adminUser = Get-CASEnvValue -Key 'CAS_ADMIN_USER' -Default 'admin'
+        #$adminPass = Get-CASEnvValue -Key 'CAS_ADMIN_PASS' -Default 'admin'
+        #$secAdmin = ConvertTo-SecureString $adminPass -AsPlainText -Force
+        #if (-not (Get-LocalUser -Name $adminUser -ErrorAction SilentlyContinue)) {
+        #    New-LocalUser -Name $adminUser -Password $secAdmin -PasswordNeverExpires -UserMayNotChangePassword:$true -ErrorAction SilentlyContinue | Out-Null
+        #} else {
+        #    try { Enable-LocalUser -Name $adminUser -ErrorAction SilentlyContinue } catch {}
+        #    try { Set-LocalUser -Name $adminUser -Password $secAdmin -PasswordNeverExpires:$true -ErrorAction SilentlyContinue } catch {}
+        #}
+        #try { Add-LocalGroupMember -Group 'Administrators' -Member $adminUser -ErrorAction SilentlyContinue } catch {}
+        #try { Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $adminUser -ErrorAction SilentlyContinue } catch {}
 
-        # Create or remove weak user
-        if ($profile.WeakCreds) {
+        # Student account posture varies by profile:
+        # - WeakCreds: keep student with weak password and admin rights (more vulnerable)
+        # - Hardened: disable student entirely
+        # - Default: strong password, standard user
+        $studentUser = Get-CASEnvValue -Key 'CAS_STUDENT_USER' -Default 'student'
+        $studentWeakPass = Get-CASEnvValue -Key 'CAS_STUDENT_WEAK_PASS' -Default 'student'
+        $studentStrongPass = Get-CASEnvValue -Key 'CAS_STUDENT_STRONG_PASS' -Default 'P@ssw0rd123!'
+
+        if ($vmProfile.Hardened) {
+            if (Get-LocalUser -Name $studentUser -ErrorAction SilentlyContinue) {
+                try { Disable-LocalUser -Name $studentUser -ErrorAction SilentlyContinue } catch {}
+                try { Remove-LocalGroupMember -Group 'Administrators' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+                try { Remove-LocalGroupMember -Group 'Remote Desktop Users' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        else {
+            $passToSet = if ($vmProfile.WeakCreds) { $studentWeakPass } else { $studentStrongPass }
+            $secStudent = ConvertTo-SecureString $passToSet -AsPlainText -Force
+            if (-not (Get-LocalUser -Name $studentUser -ErrorAction SilentlyContinue)) {
+                New-LocalUser -Name $studentUser -Password $secStudent -PasswordNeverExpires -UserMayNotChangePassword:$true -ErrorAction SilentlyContinue | Out-Null
+            } else {
+                try { Enable-LocalUser -Name $studentUser -ErrorAction SilentlyContinue } catch {}
+                try { Set-LocalUser -Name $studentUser -Password $secStudent -PasswordNeverExpires:$true -ErrorAction SilentlyContinue } catch {}
+            }
+
+            if ($vmProfile.WeakCreds) {
+                try { Add-LocalGroupMember -Group 'Administrators' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+            }
+            else {
+                try { Remove-LocalGroupMember -Group 'Administrators' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+            }
+
+            if ($vmProfile.AllowRDP) {
+                try { Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+            } else {
+                try { Remove-LocalGroupMember -Group 'Remote Desktop Users' -Member $studentUser -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+
+        # Weak user management
+        if ($vmProfile.WeakCreds) {
             if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
                 New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires -UserMayNotChangePassword:$true | Out-Null
             }
+            try { Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $user -ErrorAction SilentlyContinue } catch {}
         } else {
             if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
                 Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
             }
+            try { Disable-LocalUser -Name 'Guest' -ErrorAction SilentlyContinue } catch {}
         }
 
-        # Firewall rules
-        if ($profile.AllowRDP) { Set-NetFirewallRule -DisplayGroup "Remote Desktop" -Enabled True -Action Allow -ErrorAction SilentlyContinue }
-        else { Set-NetFirewallRule -DisplayGroup "Remote Desktop" -Enabled True -Action Block -ErrorAction SilentlyContinue }
+        # RDP configuration
+        if ($vmProfile.AllowRDP) {
+            Set-NetFirewallRule -DisplayGroup "Remote Desktop" -Enabled True -Action Allow -ErrorAction SilentlyContinue
+            try {
+                Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -ErrorAction SilentlyContinue
+            } catch {}
+        } else {
+            Set-NetFirewallRule -DisplayGroup "Remote Desktop" -Enabled True -Action Block -ErrorAction SilentlyContinue
+            try { Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 1 -ErrorAction SilentlyContinue } catch {}
+        }
 
-        if ($profile.AllowSMB) { Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True -Action Allow -ErrorAction SilentlyContinue }
-        else { Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True -Action Block -ErrorAction SilentlyContinue }
+        # SMB configuration
+        if ($vmProfile.AllowSMB) {
+            Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True -Action Allow -ErrorAction SilentlyContinue
+            try { Set-Service -Name 'LanmanServer' -StartupType Automatic -ErrorAction SilentlyContinue; Start-Service -Name 'LanmanServer' -ErrorAction SilentlyContinue } catch {}
+        }
+        else {
+            Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True -Action Block -ErrorAction SilentlyContinue
+            try { Stop-Service -Name 'LanmanServer' -ErrorAction SilentlyContinue; Set-Service -Name 'LanmanServer' -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
+        }
 
-        if ($profile.AllowWinRM) { Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue; Start-Service -Name WinRM -ErrorAction SilentlyContinue }
+        # WinRM configuration
+        if ($vmProfile.AllowWinRM) { Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue; Start-Service -Name WinRM -ErrorAction SilentlyContinue }
         else { Stop-Service -Name WinRM -ErrorAction SilentlyContinue; Set-Service -Name WinRM -StartupType Disabled -ErrorAction SilentlyContinue }
 
-        if ($profile.Hardened) {
-            # Basic hardening: enable auditing of logon events
+        if ($vmProfile.Hardened) {
+            # Hardened profile extras
             AuditPol /set /subcategory:"Logon" /success:enable /failure:enable | Out-Null
+            try { Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction SilentlyContinue } catch {}
+            try { net accounts /lockoutthreshold:3 /lockoutduration:30 /lockoutwindow:30 | Out-Null } catch {}
+            try { net accounts /minpwlen:12 /maxpwage:30 /uniquepw:5 | Out-Null } catch {}
+            try { Stop-Service -Name 'RemoteRegistry' -ErrorAction SilentlyContinue; Set-Service -Name 'RemoteRegistry' -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
+        }
+        else {
+            # Softer profiles: relax Defender to simulate insecure posture
+            try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue } catch {}
+            try { Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue } catch {}
+            try { Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue } catch {}
+            try { Set-MpPreference -DisableBlockAtFirstSeen $true -ErrorAction SilentlyContinue } catch {}
         }
     }
 
     $invokeParams = @{
         VMName      = $vm
         ScriptBlock = $scriptBlock
-        ArgumentList= @($Profile, $weakUser, $weakPass)
+        ArgumentList= @($GuestProfile, $weakUser, $weakPass)
         ErrorAction = 'SilentlyContinue'
     }
     if ($Credential) { $invokeParams.Credential = $Credential }
@@ -626,8 +960,12 @@ function Invoke-CASDifficultyScript {
     if (-not $cfg.DifficultyScript) {
         return
     }
-    if ($cfg.SkipGuestLogon -or -not $cfg.GuestCredential) {
+    if ($cfg.SkipGuestLogon) {
         Write-Verbose "Difficulty script found for '$($cfg.Difficulty)' but guest logon is disabled; skipping for '$VMName'."
+        return
+    }
+    if (-not $cfg.GuestCredential) {
+        Write-Verbose "Difficulty script found for '$($cfg.Difficulty)' but no guest credential provided; skipping for '$VMName'."
         return
     }
 
@@ -769,24 +1107,54 @@ function Invoke-CASBruteForce {
             'Hard'   { 30 }
         }
 
-        $profile = Get-CASProfile -VMName $VMName
-        Write-Verbose "Simulating brute-force attack on '$VMName' (difficulty $($script:CasConfig.Difficulty), Hardened=$($profile.Hardened), WeakCreds=$($profile.WeakCreds))..."
+        $vmProfile = Get-CASProfile -VMName $VMName
+        Write-Verbose "Simulating brute-force attack on '$VMName' (difficulty $($script:CasConfig.Difficulty), Hardened=$($vmProfile.Hardened), WeakCreds=$($vmProfile.WeakCreds))..."
 
         $edu = if ($script:CasConfig.EducationalMode) {
             'Educational: Brute force attempts generate repeated failed logins; monitor for abnormal login patterns.'
         } else { $null }
 
+        $targetIP = $null
+        if ($script:CasConfig.AttackerEnabled) {
+            $targetIP = Get-CASVMIP -VMName $VMName
+            if (-not $targetIP) {
+                Write-Verbose "Attacker VM configured but no IP found for '$VMName'; falling back to host-only simulation."
+            }
+        }
+
+        if ($script:CasConfig.AttackerEnabled -and $targetIP) {
+            $userToTest = if ($vmProfile.WeakCreds) { $weakUser } else { 'Administrator' }
+            $passListRaw = Get-CASEnvValue -Key 'CAS_BRUTEFORCE_PASSLIST' -Default 'Winter2025!,P@ssw0rd123,Welcome1!'
+            $passLines = $passListRaw -split ','
+            $hydraCmd = @("cat <<'EOF' > /tmp/cas-passlist.txt")
+            $hydraCmd += $passLines
+            $hydraCmd += "EOF"
+            $hydraCmd += "hydra -I -t 4 -l $userToTest -P /tmp/cas-passlist.txt rdp://$targetIP -s 3389 -f -V -o /tmp/cas-hydra-$VMName.log"
+            $hydraCmd = $hydraCmd -join ' && '
+
+            $attacker = Invoke-CASAttackerCommand -Command $hydraCmd -Purpose "BruteForce-$VMName"
+            Start-Sleep -Seconds $delay
+
+            $status = if ($attacker.Succeeded) { 'Succeeded' } else { 'Blocked' }
+            $detailsOutput = if ($attacker.OutputText.Length -gt 300) { $attacker.OutputText.Substring(0,300) + '...' } else { $attacker.OutputText }
+
+            Write-CASLog -Scenario 'BruteForce' -VMName $VMName -Status $status `
+                -Message "Brute-force attempt launched from attacker VM against RDP on $targetIP." `
+                -Details ("Origin=AttackerVM; AttackerIP={0}; TargetIP={1}; ExitCode={2}; HydraLog=/tmp/cas-hydra-{3}.log; Output={4}; Delay(s)={5}; Profile(Hardened={6},WeakCreds={7}); {8}" -f $attacker.AttackerIP, $targetIP, $attacker.ExitCode, $VMName, $detailsOutput, $delay, $vmProfile.Hardened, $vmProfile.WeakCreds, $edu)
+            return
+        }
+
         if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) {
             Start-Sleep -Seconds $delay
-            $status = if ($profile.Hardened -and -not $profile.WeakCreds) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($vmProfile.Hardened -and -not $vmProfile.WeakCreds) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'BruteForce' -VMName $VMName -Status $status `
                 -Message "Simulated brute-force ($attempts attempts) on $VMName (guest login skipped)." `
-                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1},WeakCreds={2}); {3}" -f $delay, $profile.Hardened, $profile.WeakCreds, $edu)
+                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1},WeakCreds={2}); {3}" -f $delay, $vmProfile.Hardened, $vmProfile.WeakCreds, $edu)
         }
         else {
             $scriptBlock = {
-                param($Attempts, $Profile)
+                param($Attempts, $GuestProfile)
 
                 $path = 'C:\CAS'
                 if (-not (Test-Path $path)) {
@@ -804,20 +1172,20 @@ function Invoke-CASBruteForce {
 
                 [pscustomobject]@{
                     LogFile   = $logFile
-                    Hardened  = $Profile.Hardened
-                    WeakCreds = $Profile.WeakCreds
+                    Hardened  = $GuestProfile.Hardened
+                    WeakCreds = $GuestProfile.WeakCreds
                 }
             }
 
-            $info = Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $attempts, $profile -ErrorAction Stop
+            $info = Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $attempts, $vmProfile -ErrorAction Stop
 
             Start-Sleep -Seconds $delay
 
-            $status = if ($profile.Hardened -and -not $profile.WeakCreds) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($vmProfile.Hardened -and -not $vmProfile.WeakCreds) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'BruteForce' -VMName $VMName -Status $status `
                 -Message "Simulated brute-force ($attempts attempts) on $VMName." `
-                -Details ("GuestLog={0}; Delay(s)={1}; Profile(Hardened={2},WeakCreds={3}); {4}" -f $info.LogFile, $delay, $profile.Hardened, $profile.WeakCreds, $edu)
+                -Details ("GuestLog={0}; Delay(s)={1}; Profile(Hardened={2},WeakCreds={3}); {4}" -f $info.LogFile, $delay, $vmProfile.Hardened, $vmProfile.WeakCreds, $edu)
         }
     }
     catch {
@@ -854,16 +1222,16 @@ function Invoke-CASPrivilegeEscalation {
             'Educational: Checks admin group membership; look for elevation attempts and token use.'
         } else { $null }
 
-        $profile = Get-CASProfile -VMName $VMName
+        $vmProfile = Get-CASProfile -VMName $VMName
 
         if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) {
             Start-Sleep -Seconds $delay
 
-            $status = if ($profile.Hardened) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($vmProfile.Hardened) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'PrivilegeEscalation' -VMName $VMName -Status $status `
                 -Message "Privilege escalation check skipped guest login on $VMName." `
-                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1}); {2}" -f $delay, $profile.Hardened, $edu)
+                -Details ("GuestLog=Skipped; Delay(s)={0}; Profile(Hardened={1}); {2}" -f $delay, $vmProfile.Hardened, $edu)
         }
         else {
             $scriptBlock = {
@@ -897,7 +1265,7 @@ function Invoke-CASPrivilegeEscalation {
 
             Start-Sleep -Seconds $delay
 
-            $status  = if ($profile.Hardened -and -not $info.IsAdmin) { 'Blocked' } else { 'Succeeded' }
+            $status  = if ($vmProfile.Hardened -and -not $info.IsAdmin) { 'Blocked' } else { 'Succeeded' }
             $message = if ($info.IsAdmin) {
                 "Privilege escalation check: user $($info.User) has admin rights."
             } else {
@@ -943,30 +1311,63 @@ function Invoke-CASPortScan {
             'Educational: Port scans enumerate exposed services; monitor for connection bursts on common ports.'
         } else { $null }
 
-        $profile = Get-CASProfile -VMName $VMName
+        $vmProfile = Get-CASProfile -VMName $VMName
+        $ports = switch ($script:CasConfig.Difficulty) {
+            'Easy'   { 22, 80, 3389, 445, 5985 }
+            'Medium' { 22, 80, 135, 139, 445, 3389, 5985 }
+            'Hard'   { 22, 80, 135, 139, 445, 3389, 5985, 5986 }
+        }
+
+        $useAttacker = $script:CasConfig.AttackerEnabled
+        $targetIP = $null
+
         $expectedOpen = @()
-        if ($profile.AllowRDP) { $expectedOpen += 3389 }
-        if ($profile.AllowSMB) { $expectedOpen += 445 }
-        if ($profile.AllowWinRM) { $expectedOpen += 5985 }
+        if ($vmProfile.AllowRDP) { $expectedOpen += 3389 }
+        if ($vmProfile.AllowSMB) { $expectedOpen += 445 }
+        if ($vmProfile.AllowWinRM) { $expectedOpen += 5985 }
+
+        if ($useAttacker) {
+            $targetIP = Get-CASVMIP -VMName $VMName
+            if (-not $targetIP) {
+                Write-Verbose "Attacker VM configured but no IP found for '$VMName'; falling back to host path."
+            }
+        }
+
+        if ($useAttacker -and $targetIP) {
+            $cmd = "sudo -n nmap -sS -T4 -p $($ports -join ',') $targetIP"
+            $scan = Invoke-CASAttackerCommand -Command $cmd -Purpose "PortScan-$VMName"
+
+            $openPorts = @()
+            if ($scan.Output) {
+                foreach ($line in $scan.Output) {
+                    if ($line -match '^\s*(\d+)/tcp\s+open') {
+                        $openPorts += [int]$matches[1]
+                    }
+                }
+            }
+
+            Start-Sleep -Seconds $delay
+            $status = if ($openPorts.Count -gt 0) { 'Succeeded' } else { 'Blocked' }
+            $detailsOut = if ($scan.OutputText.Length -gt 300) { $scan.OutputText.Substring(0,300) + '...' } else { $scan.OutputText }
+
+            Write-CASLog -Scenario 'PortScan' -VMName $VMName -Status $status `
+                -Message "Kali attacker scan completed against $targetIP (VM $VMName)." `
+                -Details ("Origin=AttackerVM; AttackerIP={0}; TargetIP={1}; PortsChecked={2}; OpenPorts={3}; ExitCode={4}; Output={5}; Delay(s)={6}; Profile(Hardened={7}); {8}" -f $scan.AttackerIP, $targetIP, ($ports -join ','), ($openPorts -join ','), $scan.ExitCode, $detailsOut, $delay, $vmProfile.Hardened, $edu)
+            return
+        }
 
         if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) {
             Start-Sleep -Seconds $delay
-            $status = if ($expectedOpen.Count -eq 0 -or $profile.Hardened) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($expectedOpen.Count -eq 0 -or $vmProfile.Hardened) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'PortScan' -VMName $VMName -Status $status `
                 -Message "Port scan skipped guest access for $VMName." `
-                -Details ("TargetIP=Skipped; PortsChecked=Skipped; ExpectedOpen={0}; Delay(s)={1}; Profile(Hardened={2}) ; {3}" -f ($expectedOpen -join ','), $delay, $profile.Hardened, $edu)
+                -Details ("TargetIP=Skipped; PortsChecked=Skipped; ExpectedOpen={0}; Delay(s)={1}; Profile(Hardened={2}) ; {3}" -f ($expectedOpen -join ','), $delay, $vmProfile.Hardened, $edu)
         }
         else {
             $targetIP = Get-CASVMIP -VMName $VMName
             if (-not $targetIP) {
                 throw "Could not determine IP address for VM '$VMName'."
-            }
-
-            $ports = switch ($script:CasConfig.Difficulty) {
-                'Easy'   { 22, 80, 3389, 445, 5985 }
-                'Medium' { 22, 80, 135, 139, 445, 3389, 5985 }
-                'Hard'   { 22, 80, 135, 139, 445, 3389, 5985, 5986 }
             }
 
             $openPorts = @()
@@ -983,7 +1384,7 @@ function Invoke-CASPortScan {
 
             Write-CASLog -Scenario 'PortScan' -VMName $VMName -Status $status `
                 -Message "Port scan complete against $targetIP (VM $VMName)." `
-                -Details ("PortsChecked={0}; OpenPorts={1}; ExpectedOpen={2}; Delay(s)={3}; Profile(Hardened={4}); {5}" -f ($ports -join ','), ($openPorts -join ','), ($expectedOpen -join ','), $delay, $profile.Hardened, $edu)
+                -Details ("PortsChecked={0}; OpenPorts={1}; ExpectedOpen={2}; Delay(s)={3}; Profile(Hardened={4}); {5}" -f ($ports -join ','), ($openPorts -join ','), ($expectedOpen -join ','), $delay, $vmProfile.Hardened, $edu)
         }
     }
     catch {
@@ -1027,15 +1428,15 @@ function Invoke-CASLateralMovement {
             'Educational: Lateral movement often leaves login events (4624/4625), service creations, and SMB/WMI traffic.'
         } else { $null }
 
-        $profile = Get-CASProfile -VMName $VMName
+        $vmProfile = Get-CASProfile -VMName $VMName
 
         if ($script:CasConfig.SkipGuestLogon -or -not $script:CasConfig.GuestCredential) {
             Start-Sleep -Seconds $delay
-            $status = if ($profile.Hardened) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($vmProfile.Hardened) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'LateralMovement' -VMName $VMName -Status $status `
                 -Message "Simulated lateral movement hops on $VMName (host-only)." `
-                -Details ("Hops={0}; GuestLog=Skipped; Delay(s)={1}; Profile(Hardened={2}); {3}" -f ($hops -join '|'), $delay, $profile.Hardened, $edu)
+                -Details ("Hops={0}; GuestLog=Skipped; Delay(s)={1}; Profile(Hardened={2}); {3}" -f ($hops -join '|'), $delay, $vmProfile.Hardened, $edu)
         }
         else {
             $scriptBlock = {
@@ -1054,11 +1455,11 @@ function Invoke-CASLateralMovement {
             $logFileInGuest = Invoke-Command -VMName $VMName -Credential $script:CasConfig.GuestCredential -ScriptBlock $scriptBlock -ArgumentList $hops -ErrorAction Stop
             Start-Sleep -Seconds $delay
 
-            $status = if ($profile.Hardened -and -not $profile.AllowSMB -and -not $profile.AllowRDP) { 'Blocked' } else { 'Succeeded' }
+            $status = if ($vmProfile.Hardened -and -not $vmProfile.AllowSMB -and -not $vmProfile.AllowRDP) { 'Blocked' } else { 'Succeeded' }
 
             Write-CASLog -Scenario 'LateralMovement' -VMName $VMName -Status $status `
                 -Message "Simulated lateral movement hops on $VMName." `
-                -Details ("Hops={0}; GuestLog={1}; Delay(s)={2}; Profile(Hardened={3},RDP={4},SMB={5}); {6}" -f ($hops -join '|'), $logFileInGuest, $delay, $profile.Hardened, $profile.AllowRDP, $profile.AllowSMB, $edu)
+                -Details ("Hops={0}; GuestLog={1}; Delay(s)={2}; Profile(Hardened={3},RDP={4},SMB={5}); {6}" -f ($hops -join '|'), $logFileInGuest, $delay, $vmProfile.Hardened, $vmProfile.AllowRDP, $vmProfile.AllowSMB, $edu)
         }
     }
     catch {
@@ -1092,6 +1493,26 @@ function Invoke-CASScenario {
 #region Orchestratie & Parallelle Uitvoering
 
 function Invoke-CASSimulation {
+    <#
+    .SYNOPSIS
+        Orkestreert alle aangevraagde aanvallen op de opgegeven VM lijst.
+
+    .DESCRIPTION
+        Bouwt een target-matrix (VM x Attack), voert scenario's sequentieel of
+        in parallel uit en bewaart de resultaten. In ChallengeMode wordt steeds
+        serieel gedraaid om operator-input te kunnen vragen.
+
+    .PARAMETER VMNames
+        Collectie VM-namen die in de simulatie opgenomen worden.
+
+    .PARAMETER AttackTypes
+        Welke scenario's moeten draaien. Standaard de set uit de
+        moduleconfiguratie.
+
+    .PARAMETER Parallel
+        Start een aparte achtergrondjob per combinatie voor snellere uitvoering
+        (behalve in ChallengeMode).
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$VMNames,
@@ -1195,6 +1616,18 @@ function Invoke-CASSimulation {
 #region Rapportage
 
 function New-CASReport {
+    <#
+    .SYNOPSIS
+        Exporteert simulatieresultaten naar HTML of CSV rapportage.
+
+    .DESCRIPTION
+        Leest de JSONL logbestanden voor de huidige sessie in en vormt een
+        samenvatting met statusindicatoren, meta-informatie en optioneel een
+        CSV-export die door SIEM/Excel kan worden verwerkt.
+
+    .PARAMETER Format
+        Rapportformaat: Html (default) of Csv.
+    #>
     [CmdletBinding()]
     param(
         [Parameter()][string]$Format = 'Html'  # Html of Csv

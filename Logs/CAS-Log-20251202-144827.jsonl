@@ -1,2 +1,0 @@
-{"SessionId":"20251202-144827","Scenario":"PortScan","VMName":"CAS-LAB-01","Timestamp":"2025-12-02T14:48:30.8829558+01:00","Difficulty":"Easy","Status":"Failed","Message":"Port scan simulation failed.","Details":"Could not determine IP address for VM 'CAS-LAB-01'."}
-{"SessionId":"20251202-144827","Scenario":"PortScan","VMName":"CAS-LAB-02","Timestamp":"2025-12-02T14:48:31.7003391+01:00","Difficulty":"Easy","Status":"Failed","Message":"Port scan simulation failed.","Details":"Could not determine IP address for VM 'CAS-LAB-02'."}
