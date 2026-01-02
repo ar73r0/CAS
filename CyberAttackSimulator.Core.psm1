@@ -297,6 +297,31 @@ function Initialize-CASSimulator {
         Pscustomobject met de volledige CAS-configuratie die elders hergebruikt
         wordt.
     #>
+    <#
+    .SYNOPSIS
+        Initialiseert de globale CAS-configuratie en valideert prerequisites.
+
+    .DESCRIPTION
+        Berekent log- en rapportpaden, zoekt naar standaard VHD/ISO beelden en
+        slaat alle instellingen op in het module-brede $script:CasConfig
+        object. Deze functie moet één keer per sessie worden aangeroepen vóór
+        provisioning of scenario-uitvoering.
+
+    .PARAMETER Difficulty
+        De gewenste moeilijkheidsgraad (Easy/Medium/Hard) die bepaalt welke
+        profielen en scenario-varianten gebruikt worden.
+
+    .PARAMETER NumberOfVMs
+        Aantal virtuele machines dat wordt uitgerold in de labomgeving.
+
+    .PARAMETER VHDPath
+        Optioneel pad naar een bestaande base image. Indien leeg wordt een
+        default pad gezocht binnen de repo.
+
+    .OUTPUTS
+        Pscustomobject met de volledige CAS-configuratie die elders hergebruikt
+        wordt.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('Easy','Medium','Hard')]
@@ -356,6 +381,7 @@ function Initialize-CASSimulator {
     $resolvedVhdPath = $null
     $baseVhdUsable = $false
     $diffDiskRoot = $null
+    $diffDiskRoot = $null
 
     if ($VHDPath) {
         if (Test-Path $VHDPath) {
@@ -384,6 +410,14 @@ function Initialize-CASSimulator {
         else {
             Write-Warning "No VHD/VHDX provided and default base image not found. VMs will be created empty."
         }
+    }
+
+    if ($resolvedVhdPath) {
+        $parentDir = Split-Path -Path $resolvedVhdPath -Parent
+        $diffDiskRoot = Join-Path $parentDir 'DiffDisks'
+    }
+    else {
+        $diffDiskRoot = Join-Path (Get-CASModuleRoot) 'VMS\BaseVM\Virtual Hard Disks\DiffDisks'
     }
 
     if ($resolvedVhdPath) {
@@ -487,6 +521,20 @@ function New-CASVirtualSwitch {
 }
 
 function New-CASLab {
+    <#
+    .SYNOPSIS
+        Richt een Hyper-V lab op basis van de huidige CAS-configuratie in.
+
+    .DESCRIPTION
+        Maakt de virtuele switch aan (tenzij WhatIf), creëert per VM een
+        differencing disk op basis van het base image en start de VM. Indien
+        gasttoegang is toegestaan wordt het difficulty-profiel toegepast in de
+        guest.
+
+    .PARAMETER WhatIfSimulation
+        Genereert enkel logische output zonder effectieve Hyper-V acties, zodat
+        runbooks veilig getest kunnen worden.
+    #>
     <#
     .SYNOPSIS
         Richt een Hyper-V lab op basis van de huidige CAS-configuratie in.
@@ -1513,6 +1561,26 @@ function Invoke-CASSimulation {
         Start een aparte achtergrondjob per combinatie voor snellere uitvoering
         (behalve in ChallengeMode).
     #>
+    <#
+    .SYNOPSIS
+        Orkestreert alle aangevraagde aanvallen op de opgegeven VM lijst.
+
+    .DESCRIPTION
+        Bouwt een target-matrix (VM x Attack), voert scenario's sequentieel of
+        in parallel uit en bewaart de resultaten. In ChallengeMode wordt steeds
+        serieel gedraaid om operator-input te kunnen vragen.
+
+    .PARAMETER VMNames
+        Collectie VM-namen die in de simulatie opgenomen worden.
+
+    .PARAMETER AttackTypes
+        Welke scenario's moeten draaien. Standaard de set uit de
+        moduleconfiguratie.
+
+    .PARAMETER Parallel
+        Start een aparte achtergrondjob per combinatie voor snellere uitvoering
+        (behalve in ChallengeMode).
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$VMNames,
@@ -1616,6 +1684,18 @@ function Invoke-CASSimulation {
 #region Rapportage
 
 function New-CASReport {
+    <#
+    .SYNOPSIS
+        Exporteert simulatieresultaten naar HTML of CSV rapportage.
+
+    .DESCRIPTION
+        Leest de JSONL logbestanden voor de huidige sessie in en vormt een
+        samenvatting met statusindicatoren, meta-informatie en optioneel een
+        CSV-export die door SIEM/Excel kan worden verwerkt.
+
+    .PARAMETER Format
+        Rapportformaat: Html (default) of Csv.
+    #>
     <#
     .SYNOPSIS
         Exporteert simulatieresultaten naar HTML of CSV rapportage.
